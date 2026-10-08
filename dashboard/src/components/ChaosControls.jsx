@@ -16,7 +16,7 @@ const scenarios = [
 
 const serviceOptions = ['frontend', 'authservice', 'cartservice', 'checkoutservice', 'recommendationservice', 'productcatalogservice', 'paymentservice', 'shippingservice', 'emailservice', 'currencyservice', 'adservice', 'database'];
 
-const ChaosControls = ({ systemState, setSystemState }) => {
+const ChaosControls = ({ systemState, setSystemState, onAdminAuthExpired }) => {
   const [scenario, setScenario] = useState(scenarios[0][0]);
   const [service, setService] = useState(scenarios[0][2]);
   const [triggering, setTriggering] = useState(false);
@@ -32,6 +32,10 @@ const ChaosControls = ({ systemState, setSystemState }) => {
         headers: { 'Content-Type': 'application/json', 'x-admin-token': localStorage.getItem('adminToken') || '' },
         body: JSON.stringify({ scenario, service: requiresTarget ? service : null }),
       });
+      if (response.status === 401 || response.status === 403) {
+        onAdminAuthExpired();
+        return;
+      }
       if (!response.ok) {
         const body = await response.json().catch(() => ({}));
         throw new Error(body.detail || 'The backend rejected the scenario.');
@@ -47,6 +51,10 @@ const ChaosControls = ({ systemState, setSystemState }) => {
   const resetSystem = async () => {
     try {
       const response = await fetch(`${API_URL}/reset`, { method: 'POST', headers: { 'x-admin-token': localStorage.getItem('adminToken') || '' } });
+      if (response.status === 401 || response.status === 403) {
+        onAdminAuthExpired();
+        return;
+      }
       if (!response.ok) throw new Error('Reset was rejected by the backend.');
       setSystemState('healthy');
     } catch (error) {

@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { API_URL } from '../api';
 import './Dashboard.css';
@@ -36,6 +36,15 @@ const Dashboard = () => {
   const [logFilters, setLogFilters] = useState({ service: '', level: '', incidentId: '', search: '', window: 'all' });
   const seenAlertIds = useRef(null);
   const toastTimer = useRef(null);
+  const authExpiredHandled = useRef(false);
+
+  const handleAdminAuthExpired = useCallback(() => {
+    if (authExpiredHandled.current) return;
+    authExpiredHandled.current = true;
+    localStorage.removeItem('adminToken');
+    localStorage.removeItem('currentUser');
+    navigate('/login', { replace: true, state: { authExpired: true } });
+  }, [navigate]);
 
   const decideRecovery = async (decision) => {
     if (!activeIncident) return;
@@ -45,6 +54,10 @@ const Dashboard = () => {
         method: 'POST',
         headers: { 'x-admin-token': localStorage.getItem('adminToken') || '' }
       });
+      if (res.status === 401 || res.status === 403) {
+        handleAdminAuthExpired();
+        return;
+      }
       if (!res.ok) {
         const body = await res.json();
         throw new Error(body.detail || 'Could not update the recovery decision.');
@@ -83,6 +96,12 @@ const Dashboard = () => {
           fetch(`${API_URL}/agents`, { headers: adminHeaders }),
           fetch(`${API_URL}/agent/status`, { headers: adminHeaders })
         ]);
+
+        const adminResponses = [incidentsRes, logsRes, alertsRes, agentsRes, backgroundRes];
+        if (adminResponses.some((response) => response.status === 401 || response.status === 403)) {
+          handleAdminAuthExpired();
+          return;
+        }
 
         if (statusRes.ok) {
           const data = await statusRes.json();
@@ -158,9 +177,10 @@ const Dashboard = () => {
       }
     };
 
+    pollBackend();
     const intervalId = setInterval(pollBackend, 1000);
     return () => clearInterval(intervalId);
-  }, []);
+  }, [handleAdminAuthExpired]);
 
   const acknowledgeAlert = async (alertId) => {
     try {
@@ -168,6 +188,10 @@ const Dashboard = () => {
         method: 'POST',
         headers: { 'x-admin-token': localStorage.getItem('adminToken') || '' }
       });
+      if (response.status === 401 || response.status === 403) {
+        handleAdminAuthExpired();
+        return;
+      }
       if (!response.ok) {
         const body = await response.json();
         throw new Error(body.detail || 'Could not acknowledge alert.');
@@ -345,6 +369,7 @@ const Dashboard = () => {
                 <ChaosControls
                   systemState={systemState}
                   setSystemState={setSystemState}
+                  onAdminAuthExpired={handleAdminAuthExpired}
                 />
               </div>
             </section>

@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useLocation, useNavigate } from 'react-router-dom';
 import { Zap, Shield, User } from 'lucide-react';
 import { API_URL } from '../api';
 import { ServiceAvailabilityNotice } from './serviceAvailability';
@@ -7,14 +7,15 @@ import { isServiceUnavailable, useServiceStatuses } from './serviceStatus';
 import './Login.css';
 
 const Login = () => {
+  const location = useLocation();
   const navigate = useNavigate();
   const [isLogin, setIsLogin] = useState(true);
-  const [role, setRole] = useState('user'); // 'user' or 'admin'
+  const [role, setRole] = useState(location.state?.authExpired ? 'admin' : 'user'); // 'user' or 'admin'
   const [formData, setFormData] = useState({ name: '', email: '', password: '' });
-  const [error, setError] = useState('');
+  const [error, setError] = useState(location.state?.authExpired ? 'Your admin session expired. Sign in again to continue.' : '');
   const { statuses: serviceStatuses, ready: servicesReady } = useServiceStatuses();
   const frontendUnavailable = servicesReady && isServiceUnavailable(serviceStatuses, 'frontend');
-  const interactionsDisabled = !servicesReady || frontendUnavailable;
+  const interactionsDisabled = !servicesReady;
 
   const handleRoleSelect = (selectedRole) => setRole(selectedRole);
 
@@ -25,7 +26,7 @@ const Login = () => {
       setError('Checking service availability. Please try again shortly.');
       return;
     }
-    if (frontendUnavailable) {
+    if (frontendUnavailable && role !== 'admin') {
       setError('Frontend service is temporarily unavailable.');
       return;
     }
