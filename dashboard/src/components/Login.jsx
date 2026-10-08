@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Zap, Shield, User } from 'lucide-react';
+import { API_URL } from '../api';
 import './Login.css';
 
 const Login = () => {
@@ -19,7 +20,7 @@ const Login = () => {
     if (isLogin) {
       if (role === 'admin') {
         try {
-          const res = await fetch('http://localhost:8000/api/auth/login', {
+          const res = await fetch(`${API_URL}/auth/login`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ email: formData.email, password: formData.password })

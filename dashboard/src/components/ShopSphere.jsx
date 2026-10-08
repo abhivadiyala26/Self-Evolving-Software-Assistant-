@@ -7,9 +7,9 @@ import {
 } from 'lucide-react';
 import { Navigate, useLocation, useNavigate } from 'react-router-dom';
 import { MOCK_PRODUCTS, CATEGORIES } from '../data/products';
+import { API_URL } from '../api';
 import './ShopSphere.css';
 
-const API = 'http://localhost:8000/api';
 const readSaved = (key, fallback) => {
   try { return JSON.parse(localStorage.getItem(key) || JSON.stringify(fallback)); }
   catch { return fallback; }
@@ -82,9 +82,9 @@ const ShopSphere = () => {
     const pollBackend = async () => {
       try {
         const [statusRes, metricsRes, ordersRes] = await Promise.all([
-          fetch(`${API}/status`),
-          fetch(`${API}/metrics`),
-          fetch(`${API}/orders`)
+          fetch(`${API_URL}/status`),
+          fetch(`${API_URL}/metrics`),
+          fetch(`${API_URL}/orders`)
         ]);
         if (statusRes.ok) {
           const data = await statusRes.json();
@@ -175,7 +175,7 @@ const ShopSphere = () => {
     if (cart.length === 0) return;
 
     try {
-      const res = await fetch(`${API}/orders`, {
+      const res = await fetch(`${API_URL}/orders`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -244,7 +244,7 @@ const ShopSphere = () => {
   if (location.pathname === '/profile' && !currentUser) return <Navigate to="/login" replace />;
   const signOut = async () => {
     const adminToken = localStorage.getItem('adminToken');
-    if (adminToken) await fetch(`${API}/auth/logout`, { method: 'POST', headers: { 'x-admin-token': adminToken } }).catch(() => {});
+    if (adminToken) await fetch(`${API_URL}/auth/logout`, { method: 'POST', headers: { 'x-admin-token': adminToken } }).catch(() => {});
     localStorage.removeItem('adminToken');
     localStorage.removeItem('currentUser');
     setCurrentUser(null);

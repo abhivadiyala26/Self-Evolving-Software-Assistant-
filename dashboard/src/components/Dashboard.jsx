@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
+import { API_URL } from '../api';
 import './Dashboard.css';
 import { Activity, Server, ShieldAlert, TerminalSquare, AlertCircle } from 'lucide-react';
 import AgentTerminal from './AgentTerminal';
@@ -40,7 +41,7 @@ const Dashboard = () => {
     if (!activeIncident) return;
     setDecisionBusy(true);
     try {
-      const res = await fetch(`http://localhost:8000/api/incidents/${activeIncident.incident_id}/${decision}-recovery`, {
+      const res = await fetch(`${API_URL}/incidents/${activeIncident.incident_id}/${decision}-recovery`, {
         method: 'POST',
         headers: { 'x-admin-token': localStorage.getItem('adminToken') || '' }
       });
@@ -57,7 +58,7 @@ const Dashboard = () => {
 
   const signOut = async () => {
     const token = localStorage.getItem('adminToken');
-    if (token) await fetch('http://localhost:8000/api/auth/logout', { method: 'POST', headers: { 'x-admin-token': token } }).catch(() => {});
+    if (token) await fetch(`${API_URL}/auth/logout`, { method: 'POST', headers: { 'x-admin-token': token } }).catch(() => {});
     localStorage.removeItem('adminToken');
     localStorage.removeItem('currentUser');
     navigate('/login');
@@ -73,14 +74,14 @@ const Dashboard = () => {
       try {
         const adminHeaders = { 'x-admin-token': localStorage.getItem('adminToken') || '' };
         const [statusRes, metricsRes, incidentsRes, logsRes, servicesRes, alertsRes, agentsRes, backgroundRes] = await Promise.all([
-          fetch('http://localhost:8000/api/status'),
-          fetch('http://localhost:8000/api/metrics'),
-          fetch('http://localhost:8000/api/incidents', { headers: adminHeaders }),
-          fetch('http://localhost:8000/api/logs', { headers: adminHeaders }),
-          fetch('http://localhost:8000/api/services'),
-          fetch('http://localhost:8000/api/alerts', { headers: adminHeaders }),
-          fetch('http://localhost:8000/api/agents', { headers: adminHeaders }),
-          fetch('http://localhost:8000/api/agent/status', { headers: adminHeaders })
+          fetch(`${API_URL}/status`),
+          fetch(`${API_URL}/metrics`),
+          fetch(`${API_URL}/incidents`, { headers: adminHeaders }),
+          fetch(`${API_URL}/logs`, { headers: adminHeaders }),
+          fetch(`${API_URL}/services`),
+          fetch(`${API_URL}/alerts`, { headers: adminHeaders }),
+          fetch(`${API_URL}/agents`, { headers: adminHeaders }),
+          fetch(`${API_URL}/agent/status`, { headers: adminHeaders })
         ]);
 
         if (statusRes.ok) {
@@ -153,7 +154,7 @@ const Dashboard = () => {
           });
         }
       } catch {
-        console.error("Backend not reachable. Ensure FastAPI is running on port 8000.");
+        console.error('Backend not reachable. Check VITE_API_BASE_URL and confirm the API is running.');
       }
     };
 
@@ -163,7 +164,7 @@ const Dashboard = () => {
 
   const acknowledgeAlert = async (alertId) => {
     try {
-      const response = await fetch(`http://localhost:8000/api/alerts/${alertId}/acknowledge`, {
+      const response = await fetch(`${API_URL}/alerts/${alertId}/acknowledge`, {
         method: 'POST',
         headers: { 'x-admin-token': localStorage.getItem('adminToken') || '' }
       });
@@ -171,7 +172,7 @@ const Dashboard = () => {
         const body = await response.json();
         throw new Error(body.detail || 'Could not acknowledge alert.');
       }
-      const alertResponse = await fetch('http://localhost:8000/api/alerts', { headers: { 'x-admin-token': localStorage.getItem('adminToken') || '' } });
+      const alertResponse = await fetch(`${API_URL}/alerts`, { headers: { 'x-admin-token': localStorage.getItem('adminToken') || '' } });
       if (alertResponse.ok) setAlerts(await alertResponse.json());
     } catch (error) {
       window.alert(error.message || 'Could not reach the AutoSRE backend.');

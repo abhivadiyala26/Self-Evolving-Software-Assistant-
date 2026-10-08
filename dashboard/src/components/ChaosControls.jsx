@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { AlertOctagon, RotateCcw } from 'lucide-react';
+import { API_URL } from '../api';
 
 const scenarios = [
   ['payment_crash', 'Payment service crash', 'paymentservice'],
@@ -26,7 +27,7 @@ const ChaosControls = ({ systemState, setSystemState }) => {
     if (systemState !== 'healthy') return;
     setTriggering(true);
     try {
-      const response = await fetch('http://localhost:8000/api/trigger_chaos', {
+      const response = await fetch(`${API_URL}/trigger_chaos`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'x-admin-token': localStorage.getItem('adminToken') || '' },
         body: JSON.stringify({ scenario, service: requiresTarget ? service : null }),
@@ -45,7 +46,7 @@ const ChaosControls = ({ systemState, setSystemState }) => {
 
   const resetSystem = async () => {
     try {
-      const response = await fetch('http://localhost:8000/api/reset', { method: 'POST', headers: { 'x-admin-token': localStorage.getItem('adminToken') || '' } });
+      const response = await fetch(`${API_URL}/reset`, { method: 'POST', headers: { 'x-admin-token': localStorage.getItem('adminToken') || '' } });
       if (!response.ok) throw new Error('Reset was rejected by the backend.');
       setSystemState('healthy');
     } catch (error) {
