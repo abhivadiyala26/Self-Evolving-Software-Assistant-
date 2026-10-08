@@ -1,0 +1,22 @@
+.service-availability-notice {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  width: min(100%, 1380px);
+  margin: 12px auto 0;
+  padding: 9px 12px;
+  color: #8f4c43;
+  border: 1px solid #ead3cf;
+  border-radius: 5px;
+  background: #fcf5f3;
+  font-size: .76rem;
+}
+.service-availability-notice span { color: #795b56; }
+.shopsphere-interactions { display: flex; flex: 1; flex-direction: column; }
+.shopsphere-interactions[inert], .login-interactions[inert] { opacity: .62; }
+.shopsphere-interactions button:disabled, .shopsphere-interactions input:disabled, .shopsphere-interactions select:disabled {
+  cursor: not-allowed;
+  opacity: .58;
+}
+.shopsphere-interactions [inert] { cursor: not-allowed; }
+.orders-unavailable-note { padding: 14px; color: #984b43; text-align: center; border: 1px solid #ead3cf; border-radius: 5px; background: #fcf4f2; font-size: .8rem; }

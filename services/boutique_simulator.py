@@ -70,6 +70,13 @@ class BoutiqueSimulator:
         self.replicas = {svc: 2 for svc in SERVICES}
         self.generate_baseline_metrics()
 
+    def begin_recovery(self, service):
+        """Expose the in-progress recovery state before verification restores health."""
+        if service not in self.service_states:
+            return False
+        self.service_states[service] = "recovering"
+        return True
+
     def recover_service(self, service):
         """Apply a bounded simulated recovery and stop the active injected fault."""
         if service not in self.service_states:

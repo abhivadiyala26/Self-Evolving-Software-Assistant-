@@ -8,6 +8,8 @@ import {
 import { Navigate, useLocation, useNavigate } from 'react-router-dom';
 import { MOCK_PRODUCTS, CATEGORIES } from '../data/products';
 import { API_URL } from '../api';
+import { ServiceAvailabilityNotice } from './serviceAvailability';
+import { isServiceUnavailable, useServiceStatuses } from './serviceStatus';
 import './ShopSphere.css';
 
 const readSaved = (key, fallback) => {
@@ -56,8 +58,22 @@ const ShopSphere = () => {
   // Toast & Telemetry State
   const [toastMsg, setToastMsg] = useState(null);
   const [systemMetrics, setSystemMetrics] = useState(null);
-  const [isOutageActive, setIsOutageActive] = useState(false);
-  const checkoutUnavailable = Boolean(systemMetrics?.paymentservice?.error_rate > 20 || systemMetrics?.paymentservice?.latency_p95_ms > 1000 || systemMetrics?.checkoutservice?.error_rate > 20);
+  const { statuses: serviceStatuses, ready: servicesReady } = useServiceStatuses();
+  const frontendUnavailable = servicesReady && isServiceUnavailable(serviceStatuses, 'frontend');
+  const frontendInteractionsDisabled = !servicesReady || frontendUnavailable;
+  const productUnavailable = !servicesReady || isServiceUnavailable(serviceStatuses, 'productcatalogservice');
+  const cartUnavailable = !servicesReady || isServiceUnavailable(serviceStatuses, 'cartservice');
+  const orderUnavailable = !servicesReady || isServiceUnavailable(serviceStatuses, 'checkoutservice');
+  const paymentUnavailable = !servicesReady || isServiceUnavailable(serviceStatuses, 'paymentservice');
+  const unavailableServiceIds = servicesReady
+    ? ['frontend', 'productcatalogservice', 'cartservice', 'checkoutservice', 'paymentservice']
+      .filter((serviceId) => isServiceUnavailable(serviceStatuses, serviceId))
+    : [];
+  const checkoutUnavailable = frontendUnavailable || orderUnavailable || paymentUnavailable || Boolean(
+    systemMetrics?.paymentservice?.error_rate > 20
+    || systemMetrics?.paymentservice?.latency_p95_ms > 1000
+    || systemMetrics?.checkoutservice?.error_rate > 20
+  );
   const [currentUser, setCurrentUser] = useState(() => readSaved('currentUser', null));
 
   useEffect(() => {
@@ -77,36 +93,31 @@ const ShopSphere = () => {
   const profileDialogOpen = isProfileOpen || (location.pathname === '/profile' && Boolean(currentUser));
   const activeCheckoutStep = location.pathname === '/checkout' && checkoutStep === 'cart' ? 'address' : checkoutStep;
 
-  // Poll backend for metrics & system state
+  // Poll live metrics and order history; service state comes from /api/services.
   useEffect(() => {
     const pollBackend = async () => {
       try {
-        const [statusRes, metricsRes, ordersRes] = await Promise.all([
-          fetch(`${API_URL}/status`),
+        const [metricsRes, ordersRes] = await Promise.all([
           fetch(`${API_URL}/metrics`),
-          fetch(`${API_URL}/orders`)
+          frontendInteractionsDisabled || orderUnavailable ? Promise.resolve(null) : fetch(`${API_URL}/orders`)
         ]);
-        if (statusRes.ok) {
-          const data = await statusRes.json();
-          setIsOutageActive(data.system_state !== 'healthy');
-        }
         if (metricsRes.ok) {
           const mData = await metricsRes.json();
           setSystemMetrics(mData);
         }
-        if (ordersRes.ok) {
+        if (ordersRes?.ok) {
           const oData = await ordersRes.json();
           setPlacedOrders(oData);
         }
       } catch {
-        console.error("Backend not reachable.");
+        // Preserve the last successful view while the next poll retries.
       }
     };
 
     const interval = setInterval(pollBackend, 2000);
     pollBackend();
     return () => clearInterval(interval);
-  }, []);
+  }, [frontendInteractionsDisabled, orderUnavailable]);
 
   const availableBrands = [...new Set(MOCK_PRODUCTS.map((product) => product.brand))].sort();
   const suggestions = searchQuery.trim()
@@ -118,8 +129,21 @@ const ShopSphere = () => {
     setTimeout(() => setToastMsg(null), 3000);
   };
 
+  const cartBlockMessage = () => {
+    if (!servicesReady) return 'Checking service availability. Please try again shortly.';
+    if (frontendUnavailable) return 'Frontend service is temporarily unavailable.';
+    if (productUnavailable) return 'Product service is temporarily unavailable.';
+    if (cartUnavailable) return 'Cart service is temporarily unavailable. Please try again shortly.';
+    return '';
+  };
+
   // Cart operations
   const addToCart = (product, quantity = 1) => {
+    const blockedMessage = cartBlockMessage();
+    if (blockedMessage) {
+      showToast(blockedMessage);
+      return false;
+    }
     setCart(prev => {
       const existing = prev.find(item => item.id === product.id);
       if (existing) {
@@ -128,9 +152,14 @@ const ShopSphere = () => {
       return [...prev, { ...product, qty: Math.min(quantity, product.stock) }];
     });
     showToast(`Added ${product.name} to Cart`);
+    return true;
   };
 
   const updateCartQty = (productId, delta) => {
+    if (!servicesReady || frontendUnavailable || cartUnavailable) {
+      showToast(!servicesReady ? 'Checking service availability. Please try again shortly.' : frontendUnavailable ? 'Frontend service is temporarily unavailable.' : 'Cart service is temporarily unavailable. Please try again shortly.');
+      return;
+    }
     setCart(prev => prev.map(item => {
       if (item.id === productId) {
         const newQty = item.qty + delta;
@@ -141,17 +170,30 @@ const ShopSphere = () => {
   };
 
   const removeFromCart = (productId) => {
+    if (!servicesReady || frontendUnavailable || cartUnavailable) {
+      showToast(!servicesReady ? 'Checking service availability. Please try again shortly.' : frontendUnavailable ? 'Frontend service is temporarily unavailable.' : 'Cart service is temporarily unavailable. Please try again shortly.');
+      return false;
+    }
     setCart(prev => prev.filter(item => item.id !== productId));
+    return true;
   };
 
   const saveForLater = (product) => {
+    if (!servicesReady || frontendUnavailable || cartUnavailable) {
+      showToast(!servicesReady ? 'Checking service availability. Please try again shortly.' : frontendUnavailable ? 'Frontend service is temporarily unavailable.' : 'Cart service is temporarily unavailable. Please try again shortly.');
+      return;
+    }
     setWishlist((prev) => prev.some((item) => item.id === product.id) ? prev : [...prev, product]);
-    removeFromCart(product.id);
+    if (!removeFromCart(product.id)) return;
     showToast('Saved to your wishlist for later.');
   };
 
   // Wishlist operations
   const toggleWishlist = (product) => {
+    if (!servicesReady || frontendUnavailable || productUnavailable) {
+      showToast(!servicesReady ? 'Checking service availability. Please try again shortly.' : frontendUnavailable ? 'Frontend service is temporarily unavailable.' : 'Product service is temporarily unavailable.');
+      return;
+    }
     setWishlist(prev => {
       const exists = prev.some(item => item.id === product.id);
       if (exists) {
@@ -172,6 +214,12 @@ const ShopSphere = () => {
 
   // Checkout submission
   const handlePlaceOrder = async () => {
+    if (!servicesReady) return showToast('Checking service availability. Please try again shortly.');
+    if (frontendUnavailable) return showToast('Frontend service is temporarily unavailable.');
+    if (cartUnavailable) return showToast('Cart service is temporarily unavailable. Please try again shortly.');
+    if (orderUnavailable) return showToast('Order service is temporarily unavailable.');
+    if (paymentUnavailable) return showToast('Payment service is temporarily unavailable. Please try again later.');
+    if (checkoutUnavailable) return showToast('Checkout is temporarily unavailable while AutoSRE investigates a service issue.');
     if (cart.length === 0) return;
 
     try {
@@ -224,6 +272,10 @@ const ShopSphere = () => {
   });
 
   const navigateToProduct = (product) => {
+    if (frontendUnavailable || productUnavailable) {
+      showToast(frontendUnavailable ? 'Frontend service is temporarily unavailable.' : 'Product service is temporarily unavailable.');
+      return;
+    }
     const next = [product, ...recentlyViewed.filter((item) => item.id !== product.id)].slice(0, 8);
     setRecentlyViewed(next);
     localStorage.setItem('shopsphereRecent', JSON.stringify(next));
@@ -254,6 +306,8 @@ const ShopSphere = () => {
 
   return (
     <div className="shopsphere-root">
+      <ServiceAvailabilityNotice services={unavailableServiceIds} />
+      <div className="shopsphere-interactions" inert={frontendInteractionsDisabled}>
       {/* Top Header */}
       <header className="shopsphere-header">
         <div className="header-top-nav">
@@ -274,13 +328,14 @@ const ShopSphere = () => {
               type="text"
               placeholder="Search for Mobiles, Laptops, Electronics, Fashion & more..."
               value={searchQuery}
+              disabled={productUnavailable}
               onChange={(e) => setSearchQuery(e.target.value)}
               onFocus={() => setSearchFocused(true)}
               onBlur={() => setTimeout(() => setSearchFocused(false), 120)}
             />
-            {searchQuery && <X size={16} color="#8B949E" style={{ cursor: 'pointer' }} onClick={() => setSearchQuery('')} />}
+            {searchQuery && <X size={16} color="#8B949E" style={{ cursor: productUnavailable ? 'not-allowed' : 'pointer' }} onClick={() => { if (!productUnavailable) setSearchQuery(''); }} />}
             {searchFocused && suggestions.length > 0 && (
-              <div className="search-suggestions">
+              <div className="search-suggestions" inert={productUnavailable}>
                 {suggestions.map((product) => (
                   <button key={product.id} onMouseDown={(event) => event.preventDefault()} onClick={() => { setSearchFocused(false); navigateToProduct(product); }}>
                     <Search size={14} /><span>{product.name}</span><small>{product.brand}</small>
@@ -330,6 +385,7 @@ const ShopSphere = () => {
             <button
               key={cat.id}
               className={`category-nav-item ${selectedCategory === cat.id ? 'active' : ''}`}
+              disabled={productUnavailable}
               onClick={() => { setSelectedCategory(cat.id); navigate('/products'); }}
             >
               {cat.name}
@@ -340,16 +396,6 @@ const ShopSphere = () => {
 
       {/* Main Body */}
       <main className="shopsphere-content">
-        {/* Outage Warning Banner if SRE detects crash */}
-        {isOutageActive && (
-          <div className="shopsphere-toast animate-fade-in outage-notice">
-            <AlertCircle size={20} />
-            <div>
-              <strong>ShopSphere service notice:</strong> AutoSRE detected a service issue. Checkout availability may be affected while the admin reviews recovery.
-            </div>
-          </div>
-        )}
-
         {/* Hero Promotional Banner */}
         {selectedCategory === 'all' && !searchQuery && (
           <section className="hero-banner animate-fade-in">
@@ -373,7 +419,7 @@ const ShopSphere = () => {
         )}
 
         {selectedCategory === 'all' && !searchQuery && (
-          <section className="home-shelves">
+          <section className="home-shelves" inert={productUnavailable}>
             <div><h3>Best Sellers · Trending Products</h3><div className="mini-product-strip">{[...MOCK_PRODUCTS].sort((a, b) => b.reviewCount - a.reviewCount).slice(0, 5).map((product) => <button key={product.id} onClick={() => navigateToProduct(product)}><img src={product.images[0]} alt="" /><span>{product.name}</span><strong>{formatINR(product.price)}</strong></button>)}</div></div>
             <div><h3>Recommended For You</h3><div className="mini-product-strip">{MOCK_PRODUCTS.slice(3, 8).map((product) => <button key={product.id} onClick={() => navigateToProduct(product)}><img src={product.images[0]} alt="" /><span>{product.name}</span><strong>{formatINR(product.price)}</strong></button>)}</div></div>
             {recentlyViewed.length > 0 && <div><h3>Recently Viewed</h3><div className="mini-product-strip">{recentlyViewed.slice(0, 5).map((product) => <button key={product.id} onClick={() => navigateToProduct(product)}><img src={product.images[0]} alt="" /><span>{product.name}</span><strong>{formatINR(product.price)}</strong></button>)}</div></div>}
@@ -381,7 +427,7 @@ const ShopSphere = () => {
         )}
 
         {/* Product Listing Section */}
-        <section className="product-listing-section">
+        <section className="product-listing-section" inert={productUnavailable}>
           <div className="section-header">
             <h3>
               {selectedCategory === 'all' ? "Today's Featured Products" : `Browsing: ${selectedCategory.toUpperCase()}`}
@@ -440,11 +486,12 @@ const ShopSphere = () => {
 
                   <button
                     className="btn-add-cart"
+                    disabled={frontendUnavailable || productUnavailable || cartUnavailable}
                     onClick={(e) => { e.stopPropagation(); addToCart(product); }}
                   >
                     <ShoppingCart size={14} /> Add to Cart
                   </button>
-                  <button className="btn-buy-now" onClick={(e) => { e.stopPropagation(); addToCart(product); navigate('/checkout'); }}>Buy Now</button>
+                  <button className="btn-buy-now" disabled={frontendUnavailable || productUnavailable || cartUnavailable} onClick={(e) => { e.stopPropagation(); if (addToCart(product)) navigate('/checkout'); }}>Buy Now</button>
                 </div>
               </div>
             ))}
@@ -463,7 +510,7 @@ const ShopSphere = () => {
             <div className="modal-body product-detail-layout">
               <div>
                 <img src={selectedImage} alt={selectedProduct.name} style={{ width: '100%', borderRadius: '12px', height: '300px', objectFit: 'cover' }} />
-                {selectedProduct.images.length > 1 && <div className="detail-image-strip">{selectedProduct.images.map((src, index) => <button key={src} aria-label={`Show product image ${index + 1}`} className={selectedImageIndex === index ? 'selected' : ''} onClick={() => setSelectedImageIndex(index)}><img src={src} alt="" /></button>)}</div>}
+                {selectedProduct.images.length > 1 && <div className="detail-image-strip">{selectedProduct.images.map((src, index) => <button key={src} aria-label={`Show product image ${index + 1}`} className={selectedImageIndex === index ? 'selected' : ''} disabled={productUnavailable} onClick={() => setSelectedImageIndex(index)}><img src={src} alt="" /></button>)}</div>}
               </div>
               <div style={{ display: 'flex', flexDirection: 'column', gap: '0.8rem' }}>
                 <span className="product-brand">{selectedProduct.brand}</span>
@@ -477,9 +524,9 @@ const ShopSphere = () => {
                 </div>
 
                 <div className="offer-note"><strong>Bank offer:</strong> 10% instant discount on HDFC cards. No-cost EMI available on select cards.</div>
-                <div className="delivery-check"><MapPin size={16} /><span>Delivery PIN</span><input aria-label="Delivery PIN code" value={deliveryPincode} maxLength={6} onChange={(event) => setDeliveryPincode(event.target.value.replace(/\D/g, ''))} /><strong>{selectedProduct.deliveryEstimate}</strong></div>
+                <div className="delivery-check"><MapPin size={16} /><span>Delivery PIN</span><input aria-label="Delivery PIN code" value={deliveryPincode} maxLength={6} disabled={productUnavailable} onChange={(event) => setDeliveryPincode(event.target.value.replace(/\D/g, ''))} /><strong>{selectedProduct.deliveryEstimate}</strong></div>
                 <span className={selectedProduct.stock <= 10 ? 'stock-status low-stock' : 'stock-status'}>{selectedProduct.stock <= 10 ? `Only ${selectedProduct.stock} left` : `${selectedProduct.stock} available`}</span>
-                <div className="detail-quantity"><span>Quantity</span><button onClick={() => setDetailQuantity((quantity) => Math.max(1, quantity - 1))}>−</button><strong>{detailQuantity}</strong><button onClick={() => setDetailQuantity((quantity) => Math.min(selectedProduct.stock, quantity + 1))}>+</button></div>
+                <div className="detail-quantity"><span>Quantity</span><button disabled={productUnavailable || cartUnavailable} onClick={() => setDetailQuantity((quantity) => Math.max(1, quantity - 1))}>−</button><strong>{detailQuantity}</strong><button disabled={productUnavailable || cartUnavailable} onClick={() => setDetailQuantity((quantity) => Math.min(selectedProduct.stock, quantity + 1))}>+</button></div>
 
                 <div className="product-specifications">
                   <strong>Specifications:</strong>
@@ -494,12 +541,13 @@ const ShopSphere = () => {
                 <button
                   className="btn-add-cart"
                   style={{ padding: '0.8rem', fontSize: '1rem', marginTop: 'auto' }}
-                  onClick={() => { addToCart(selectedProduct, detailQuantity); closeProductDetails(); }}
+                  disabled={frontendUnavailable || productUnavailable || cartUnavailable}
+                  onClick={() => { if (addToCart(selectedProduct, detailQuantity)) closeProductDetails(); }}
                 >
                   <ShoppingCart size={18} /> Add to Cart Now
                 </button>
-                <button className="btn-buy-now" onClick={() => { addToCart(selectedProduct, detailQuantity); closeProductDetails(); navigate('/checkout'); }}>Buy Now</button>
-                <button className="save-later-btn" onClick={() => toggleWishlist(selectedProduct)}><Heart size={15} /> Save to Wishlist</button>
+                <button className="btn-buy-now" disabled={frontendUnavailable || productUnavailable || cartUnavailable} onClick={() => { if (addToCart(selectedProduct, detailQuantity)) { closeProductDetails(); navigate('/checkout'); } }}>Buy Now</button>
+                <button className="save-later-btn" disabled={frontendUnavailable || productUnavailable} onClick={() => toggleWishlist(selectedProduct)}><Heart size={15} /> Save to Wishlist</button>
               </div>
             </div>
             <div className="product-detail-extras">
@@ -510,7 +558,7 @@ const ShopSphere = () => {
               </section>
               <section>
                 <h4>Similar products</h4>
-                <div className="similar-product-list">{MOCK_PRODUCTS.filter((product) => product.category === selectedProduct.category && product.id !== selectedProduct.id).slice(0, 3).map((product) => <button key={product.id} onClick={() => navigateToProduct(product)}><img src={product.images[0]} alt="" /><span>{product.name}</span><strong>{formatINR(product.price)}</strong></button>)}</div>
+                <div className="similar-product-list" inert={productUnavailable}>{MOCK_PRODUCTS.filter((product) => product.category === selectedProduct.category && product.id !== selectedProduct.id).slice(0, 3).map((product) => <button key={product.id} disabled={productUnavailable} onClick={() => navigateToProduct(product)}><img src={product.images[0]} alt="" /><span>{product.name}</span><strong>{formatINR(product.price)}</strong></button>)}</div>
               </section>
             </div>
           </div>
@@ -543,12 +591,12 @@ const ShopSphere = () => {
                             <div className="cart-item-price">{formatINR(item.price)}</div>
                           </div>
                           <div className="cart-qty-control">
-                            <button className="modal-close-btn" onClick={() => updateCartQty(item.id, -1)}>-</button>
+                            <button className="modal-close-btn" disabled={frontendUnavailable || cartUnavailable} onClick={() => updateCartQty(item.id, -1)}>-</button>
                             <span>{item.qty}</span>
-                            <button className="modal-close-btn" onClick={() => updateCartQty(item.id, 1)}>+</button>
+                            <button className="modal-close-btn" disabled={frontendUnavailable || cartUnavailable} onClick={() => updateCartQty(item.id, 1)}>+</button>
                           </div>
-                          <button className="save-later-btn" onClick={() => saveForLater(item)}><BookmarkCheck size={14} /> Save for later</button>
-                          <button className="modal-close-btn" onClick={() => removeFromCart(item.id)}><X size={16} /></button>
+                          <button className="save-later-btn" disabled={frontendUnavailable || cartUnavailable} onClick={() => saveForLater(item)}><BookmarkCheck size={14} /> Save for later</button>
+                          <button className="modal-close-btn" disabled={frontendUnavailable || cartUnavailable} onClick={() => removeFromCart(item.id)}><X size={16} /></button>
                         </div>
                       ))}
 
@@ -562,7 +610,7 @@ const ShopSphere = () => {
                         </div>
                       </div>
 
-                      <button className="btn-banner-shop checkout-continue" onClick={() => { setCheckoutStep('address'); navigate('/checkout'); }}>
+                      <button className="btn-banner-shop checkout-continue" disabled={frontendUnavailable || cartUnavailable} onClick={() => { setCheckoutStep('address'); navigate('/checkout'); }}>
                         Proceed to Delivery Address <ArrowRight size={16} />
                       </button>
                     </div>
@@ -605,17 +653,18 @@ const ShopSphere = () => {
               {activeCheckoutStep === 'payment' && (
                 <div className="checkout-step-content">
                   <h4>Select Payment Method</h4>
-                  {checkoutUnavailable && <div className="checkout-outage-note"><AlertCircle size={16} /> Payment is temporarily unavailable while AutoSRE investigates a service issue.</div>}
+                  {checkoutUnavailable && <div className="checkout-outage-note"><AlertCircle size={16} /> {orderUnavailable ? 'Order service is temporarily unavailable.' : paymentUnavailable ? 'Payment service is temporarily unavailable. Please try again later.' : 'Payment is temporarily unavailable while AutoSRE investigates a service issue.'}</div>}
                   {['upi', 'card', 'netbanking', 'cod'].map(m => (
                     <div
                       key={m}
+                      inert={checkoutUnavailable}
                       onClick={() => setSelectedPayment(m)}
                       className={`checkout-choice-card payment-choice ${selectedPayment === m ? 'selected' : ''}`}
                     >
                       <strong>{m === 'upi' ? 'UPI (Google Pay / PhonePe)' : m === 'card' ? 'Credit / Debit Card' : m === 'netbanking' ? 'Net Banking' : 'Cash on Delivery (COD)'}</strong>
                     </div>
                   ))}
-                  <button className="btn-banner-shop" onClick={handlePlaceOrder} disabled={checkoutUnavailable}>
+                  <button className="btn-banner-shop" onClick={handlePlaceOrder} disabled={checkoutUnavailable || cartUnavailable}>
                     Pay & Place Order ({formatINR(finalTotal)})
                   </button>
                 </div>
@@ -650,7 +699,11 @@ const ShopSphere = () => {
               <button className="modal-close-btn" onClick={closeOrders}><X size={18} /></button>
             </div>
             <div className="modal-body">
-              {placedOrders.length === 0 ? (
+              {frontendUnavailable || orderUnavailable ? (
+                <div className="orders-unavailable-note" role="status">
+                  {frontendUnavailable ? 'Frontend service is temporarily unavailable.' : 'Order service is temporarily unavailable.'}
+                </div>
+              ) : placedOrders.length === 0 ? (
                 <div style={{ color: '#8B949E', textAlign: 'center', padding: '2rem' }}>No past orders found.</div>
               ) : (
                 placedOrders.map(ord => (
@@ -677,7 +730,7 @@ const ShopSphere = () => {
           <div className="modal-content animate-fade-in" onClick={(event) => event.stopPropagation()}>
             <div className="modal-header"><h3>My Wishlist ({wishlist.length})</h3><button className="modal-close-btn" onClick={() => setIsWishlistOpen(false)}><X size={18} /></button></div>
             <div className="modal-body">
-              {wishlist.length === 0 ? <p>Your wishlist is ready for products you love.</p> : wishlist.map((product) => <div className="wishlist-row" key={product.id}><img src={product.images[0]} alt={product.name} /><div><strong>{product.name}</strong><span>{formatINR(product.price)}</span></div><button onClick={() => { addToCart(product); setIsWishlistOpen(false); }}>Add to Cart</button><button className="modal-close-btn" onClick={() => toggleWishlist(product)}><X size={16} /></button></div>)}
+              {wishlist.length === 0 ? <p>Your wishlist is ready for products you love.</p> : wishlist.map((product) => <div className="wishlist-row" key={product.id}><img src={product.images[0]} alt={product.name} /><div><strong>{product.name}</strong><span>{formatINR(product.price)}</span></div><button disabled={frontendUnavailable || productUnavailable || cartUnavailable} onClick={() => { if (addToCart(product)) setIsWishlistOpen(false); }}>Add to Cart</button><button className="modal-close-btn" disabled={frontendUnavailable || productUnavailable} onClick={() => toggleWishlist(product)}><X size={16} /></button></div>)}
             </div>
           </div>
         </div>
@@ -728,6 +781,7 @@ const ShopSphere = () => {
           <span>{toastMsg}</span>
         </div>
       )}
+      </div>
     </div>
   );
 };

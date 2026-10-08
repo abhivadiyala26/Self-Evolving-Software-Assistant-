@@ -3,6 +3,7 @@ from fastapi import FastAPI, BackgroundTasks, Depends, Header, HTTPException, Qu
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import asyncio
+import os
 import time
 import uuid
 from datetime import datetime, timezone, timedelta
@@ -19,10 +20,47 @@ from services.incident_service import incident_manager, evaluate_severity, analy
 
 app = FastAPI(title="AutoSRE Agent Backend")
 
+DEFAULT_DEMO_FAILURE_SERVICES = ["frontend", "cartservice", "paymentservice", "productcatalogservice"]
+ALLOWED_DEMO_FAILURE_SERVICES = {
+    "frontend", "productcatalogservice", "cartservice", "checkoutservice", "paymentservice"
+}
+
+def _read_demo_failure_services():
+    configured = os.getenv("AUTOSRE_DEMO_FAILURE_SERVICES", ",".join(DEFAULT_DEMO_FAILURE_SERVICES))
+    services = list(dict.fromkeys(
+        service.strip().lower()
+        for service in configured.split(",")
+        if service.strip().lower() in ALLOWED_DEMO_FAILURE_SERVICES
+    ))
+    return services if len(services) >= 3 else DEFAULT_DEMO_FAILURE_SERVICES[:]
+
+def _read_demo_failure_count():
+    try:
+        configured = int(os.getenv("AUTOSRE_DEMO_FAILURE_COUNT", "4"))
+    except ValueError:
+        configured = 4
+    return min(4, max(3, configured))
+
+def _read_demo_seconds(name, default):
+    try:
+        configured = float(os.getenv(name, str(default)))
+    except ValueError:
+        configured = default
+    return max(0.0, configured)
+
+DEMO_FAILURE_SERVICES = _read_demo_failure_services()
+DEMO_FAILURE_COUNT = min(_read_demo_failure_count(), len(DEMO_FAILURE_SERVICES))
+DEMO_FAILURE_START_DELAY_SECONDS = _read_demo_seconds("AUTOSRE_DEMO_START_DELAY_SECONDS", 20)
+DEMO_FAILURE_MIN_DOWN_SECONDS = _read_demo_seconds("AUTOSRE_DEMO_MIN_DOWN_SECONDS", 12)
+DEMO_FAILURE_RECOVERY_PAUSE_SECONDS = _read_demo_seconds("AUTOSRE_DEMO_RECOVERY_PAUSE_SECONDS", 15)
+automatic_demo_incidents = {}
+automatic_demo_crashes = {}
+
 @app.on_event("startup")
 async def startup_event():
     asyncio.create_task(simulator.run(add_log))
     asyncio.create_task(background_monitor_loop())
+    asyncio.create_task(automatic_demo_failure_loop())
 
 # Allow CORS for React dashboard
 app.add_middleware(
@@ -71,6 +109,9 @@ background_agent = {
     "escalations": 0,
     "last_action": "Starting telemetry monitor",
     "activity": [],
+    "demo_failures_total": DEMO_FAILURE_COUNT,
+    "demo_failures_completed": 0,
+    "demo_failure_current_service": None,
 }
 monitor_violation_streaks = {}
 processed_incidents = set()
@@ -159,8 +200,16 @@ async def background_monitor_loop():
                 if candidate:
                     name = candidate["id"]
                     current_system_state = "anomaly"
-                    active = incident_manager.create_incident("telemetry_anomaly", name, metrics)
+                    is_automatic_demo_crash = (
+                        name == simulator.target_service
+                        and simulator.chaos_scenario == "service_crash"
+                        and name in automatic_demo_crashes
+                    )
+                    incident_scenario = "service_crash" if is_automatic_demo_crash else "telemetry_anomaly"
+                    active = incident_manager.create_incident(incident_scenario, name, metrics)
                     incident_id = active["incident_id"]
+                    if is_automatic_demo_crash:
+                        automatic_demo_incidents[incident_id] = automatic_demo_crashes[name]
                     add_alert(name, active["severity"], f"Sustained anomaly · {name}", "Background monitor observed a sustained health or telemetry threshold breach.", incident_id)
                     add_log("Monitoring Agent", "Detection", f"Sustained telemetry anomaly detected on {name}; incident {incident_id} opened.")
 
@@ -177,9 +226,50 @@ async def background_monitor_loop():
             add_log("Monitoring Agent", "Error", f"Background telemetry cycle failed: {error}")
         await asyncio.sleep(1)
 
+async def automatic_demo_failure_loop():
+    """Inject one demo crash at a time and let the regular monitor/recovery pipeline handle it."""
+    global current_system_state
+    await asyncio.sleep(DEMO_FAILURE_START_DELAY_SECONDS)
+    sequence = DEMO_FAILURE_SERVICES[:DEMO_FAILURE_COUNT]
+
+    for target_service in sequence:
+        while (
+            current_system_state != "healthy"
+            or incident_manager.get_active_incident() is not None
+            or any(status != "healthy" for status in simulator.service_states.values())
+        ):
+            await asyncio.sleep(1)
+
+        background_agent["demo_failure_current_service"] = target_service
+        current_system_state = "anomaly"
+        automatic_demo_crashes[target_service] = time.monotonic()
+        simulator.trigger_chaos("service_crash", target_service)
+        add_log(
+            "Background Agent",
+            "Critical Demo Failure",
+            f"Injected a demo crash for {target_service}; the service is DOWN and the monitoring pipeline will detect it.",
+        )
+
+        while (
+            simulator.service_states.get(target_service) != "healthy"
+            or incident_manager.get_active_incident() is not None
+            or current_system_state != "healthy"
+        ):
+            await asyncio.sleep(1)
+
+        background_agent["demo_failures_completed"] += 1
+        background_agent["demo_failure_current_service"] = None
+        automatic_demo_crashes.pop(target_service, None)
+        automatic_demo_incidents.clear()
+        add_log("Background Agent", "Demo Recovery", f"Recovery and verification completed for {target_service}.")
+        if background_agent["demo_failures_completed"] < len(sequence):
+            await asyncio.sleep(DEMO_FAILURE_RECOVERY_PAUSE_SECONDS)
+
 @app.post("/api/auth/login")
 async def admin_login(credentials: AdminLogin):
     # Demo credentials are deliberately fixed for the college demonstration.
+    if simulator.service_states.get("frontend") != "healthy":
+        raise HTTPException(status_code=503, detail="Frontend service is temporarily unavailable.")
     if simulator.service_states.get("authservice") != "healthy":
         raise HTTPException(status_code=503, detail="Authentication service is unavailable.")
     if credentials.email.lower() != "admin@technogear.com" or credentials.password != "password":
@@ -497,6 +587,14 @@ async def orchestrate_agents(scenario: str = "payment_crash", incident_id: str =
         add_log("Recommendation Agent", "Action", remediation_plan["message"])
 
         risk_level = classify_recovery_risk(scenario, svc, all_metrics, impact)
+        demo_crash_started = automatic_demo_incidents.get(incident_id)
+        if demo_crash_started is not None:
+            remaining_down_time = DEMO_FAILURE_MIN_DOWN_SECONDS - (time.monotonic() - demo_crash_started)
+            if remaining_down_time > 0:
+                await asyncio.sleep(remaining_down_time)
+                if generation is not None and generation != runtime_generation:
+                    return
+
         if incident_id:
             incident_manager.update_incident(incident_id, {
                 "status": "awaiting_approval" if risk_level in {"high", "critical"} else "recovering",
@@ -557,6 +655,10 @@ async def execute_approved_recovery(incident_id: str, generation: int, automatic
             if action == "scale_deployment" and not simulator.scale_service(target, min(4, max(1, int(plan.get("replicas", 3))))):
                 result = {"status": "failed", "message": "Scaling policy rejected the requested replica count; automatic limit is four."}
             elif action in {"restart_service", "restart_simulation", "restart_pod", "restore_connection", "reduce_load", "retry_request", "remove_bad_replica", "scale_deployment"}:
+                simulator.begin_recovery(target)
+                await asyncio.sleep(1.5)
+                if generation != runtime_generation:
+                    return
                 simulator.recover_service(target)
             else:
                 result = {"status": "failed", "message": result.get("message", "No safe recovery action was available.")}
@@ -678,12 +780,18 @@ async def start_service(service: str, admin: bool = Depends(require_admin)):
 
 @app.get("/api/orders")
 async def get_orders():
+    if simulator.service_states.get("frontend") != "healthy":
+        raise HTTPException(status_code=503, detail="Frontend service is temporarily unavailable.")
+    if simulator.service_states.get("checkoutservice") != "healthy":
+        raise HTTPException(status_code=503, detail="Order service is temporarily unavailable.")
     return orders
 
 async def progress_order(order_id: str):
     stages = ["CONFIRMED", "PACKED", "SHIPPED", "OUT FOR DELIVERY", "DELIVERED"]
     for stage in stages:
         await asyncio.sleep(3)
+        if simulator.service_states.get("checkoutservice") != "healthy":
+            return
         order = next((item for item in orders if item["order_id"] == order_id), None)
         if not order:
             return
@@ -692,8 +800,15 @@ async def progress_order(order_id: str):
 
 @app.post("/api/orders")
 async def place_order(order: OrderRequest):
-    if simulator.service_states.get("paymentservice") != "healthy" or simulator.service_states.get("checkoutservice") != "healthy":
-        raise HTTPException(status_code=503, detail="Checkout is temporarily unavailable while payment services recover.")
+    unavailable_services = (
+        ("frontend", "Frontend service"),
+        ("cartservice", "Cart service"),
+        ("checkoutservice", "Order service"),
+        ("paymentservice", "Payment service"),
+    )
+    for service_id, label in unavailable_services:
+        if simulator.service_states.get(service_id) != "healthy":
+            raise HTTPException(status_code=503, detail=f"{label} is temporarily unavailable.")
     if not order.items:
         raise HTTPException(status_code=422, detail="Your cart is empty.")
     now = datetime.now(timezone.utc)

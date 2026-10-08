@@ -2,6 +2,8 @@ import React, { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Zap, Shield, User } from 'lucide-react';
 import { API_URL } from '../api';
+import { ServiceAvailabilityNotice } from './serviceAvailability';
+import { isServiceUnavailable, useServiceStatuses } from './serviceStatus';
 import './Login.css';
 
 const Login = () => {
@@ -10,12 +12,23 @@ const Login = () => {
   const [role, setRole] = useState('user'); // 'user' or 'admin'
   const [formData, setFormData] = useState({ name: '', email: '', password: '' });
   const [error, setError] = useState('');
+  const { statuses: serviceStatuses, ready: servicesReady } = useServiceStatuses();
+  const frontendUnavailable = servicesReady && isServiceUnavailable(serviceStatuses, 'frontend');
+  const interactionsDisabled = !servicesReady || frontendUnavailable;
 
   const handleRoleSelect = (selectedRole) => setRole(selectedRole);
 
   const handleSubmit = async (e) => {
     e.preventDefault();
     setError('');
+    if (!servicesReady) {
+      setError('Checking service availability. Please try again shortly.');
+      return;
+    }
+    if (frontendUnavailable) {
+      setError('Frontend service is temporarily unavailable.');
+      return;
+    }
 
     if (isLogin) {
       if (role === 'admin') {
@@ -86,7 +99,9 @@ const Login = () => {
         </div>
 
         {error && <div className="login-error">{error}</div>}
+        <ServiceAvailabilityNotice services={frontendUnavailable ? ['frontend'] : []} />
 
+        <div className="login-interactions" inert={interactionsDisabled}>
         <div className="role-selector">
           <button 
             type="button"
@@ -181,6 +196,7 @@ const Login = () => {
           >
              Inject Demo Data
           </button>
+        </div>
         </div>
       </div>
     </div>
