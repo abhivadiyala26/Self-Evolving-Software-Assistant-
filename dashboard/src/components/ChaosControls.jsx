@@ -1,118 +1,72 @@
 import React, { useState } from 'react';
-import { Play, AlertOctagon, RotateCcw } from 'lucide-react';
+import { AlertOctagon, RotateCcw } from 'lucide-react';
+
+const scenarios = [
+  ['payment_crash', 'Payment service crash', 'paymentservice'],
+  ['payment_high_latency', 'Payment latency degradation', 'paymentservice'],
+  ['frontend_spike', 'Frontend traffic spike', 'frontend'],
+  ['database_failure', 'Database connection failure', 'database'],
+  ['service_crash', 'Stop a service', 'frontend'],
+  ['api_error_spike', 'API error spike', 'paymentservice'],
+  ['cpu_spike', 'CPU saturation', 'frontend'],
+  ['memory_spike', 'Memory pressure', 'database'],
+  ['network_timeout', 'Network timeout', 'checkoutservice'],
+];
+
+const serviceOptions = ['frontend', 'authservice', 'cartservice', 'checkoutservice', 'recommendationservice', 'productcatalogservice', 'paymentservice', 'shippingservice', 'emailservice', 'currencyservice', 'adservice', 'database'];
 
 const ChaosControls = ({ systemState, setSystemState }) => {
+  const [scenario, setScenario] = useState(scenarios[0][0]);
+  const [service, setService] = useState(scenarios[0][2]);
   const [triggering, setTriggering] = useState(false);
+  const selectedScenario = scenarios.find(([key]) => key === scenario);
+  const requiresTarget = ['service_crash', 'api_error_spike', 'cpu_spike', 'memory_spike', 'network_timeout'].includes(scenario);
 
-  const triggerFailure = async (scenario) => {
+  const triggerFailure = async () => {
     if (systemState !== 'healthy') return;
-    
     setTriggering(true);
     try {
-      const res = await fetch('http://localhost:8000/api/trigger_chaos', {
+      const response = await fetch('http://localhost:8000/api/trigger_chaos', {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({ scenario: scenario })
+        headers: { 'Content-Type': 'application/json', 'x-admin-token': localStorage.getItem('adminToken') || '' },
+        body: JSON.stringify({ scenario, service: requiresTarget ? service : null }),
       });
-      if (res.ok) {
-        setSystemState('anomaly');
+      if (!response.ok) {
+        const body = await response.json().catch(() => ({}));
+        throw new Error(body.detail || 'The backend rejected the scenario.');
       }
-    } catch (err) {
-      console.error("Failed to trigger chaos via backend.", err);
+      setSystemState('anomaly');
+    } catch (error) {
+      window.alert(error.message || 'Could not reach the AutoSRE backend.');
+    } finally {
+      setTriggering(false);
     }
-    setTriggering(false);
   };
 
   const resetSystem = async () => {
     try {
-      await fetch('http://localhost:8000/api/reset', { method: 'POST' });
-    } catch (err) {
-      console.error("Failed to reset backend.", err);
+      const response = await fetch('http://localhost:8000/api/reset', { method: 'POST', headers: { 'x-admin-token': localStorage.getItem('adminToken') || '' } });
+      if (!response.ok) throw new Error('Reset was rejected by the backend.');
+      setSystemState('healthy');
+    } catch (error) {
+      window.alert(error.message || 'Could not reset the demo.');
     }
   };
 
   return (
-    <div style={{ display: 'flex', gap: '1rem', flexWrap: 'wrap' }}>
-      <button 
-        style={{
-          background: systemState === 'healthy' ? 'rgba(255,0,127,0.1)' : 'rgba(255,255,255,0.05)',
-          color: systemState === 'healthy' ? '#FF007F' : '#8A8F98',
-          border: `1px solid ${systemState === 'healthy' ? '#FF007F' : 'transparent'}`,
-          padding: '0.8rem 1.2rem',
-          borderRadius: '8px',
-          cursor: systemState === 'healthy' && !triggering ? 'pointer' : 'not-allowed',
-          display: 'flex',
-          alignItems: 'center',
-          gap: '0.5rem',
-          fontWeight: 600,
-          transition: 'all 0.2s',
-          boxShadow: systemState === 'healthy' ? '0 0 10px rgba(255,0,127,0.2)' : 'none'
-        }}
-        onClick={() => triggerFailure('payment_crash')}
-        disabled={systemState !== 'healthy' || triggering}
-      >
-        <AlertOctagon size={18} />
-        {triggering ? "Injecting..." : "Crash Payment Service"}
-      </button>
-
-      <button 
-        style={{
-          background: systemState === 'healthy' ? 'rgba(255,165,0,0.1)' : 'rgba(255,255,255,0.05)',
-          color: systemState === 'healthy' ? '#FFA500' : '#8A8F98',
-          border: `1px solid ${systemState === 'healthy' ? '#FFA500' : 'transparent'}`,
-          padding: '0.8rem 1.2rem',
-          borderRadius: '8px',
-          cursor: systemState === 'healthy' && !triggering ? 'pointer' : 'not-allowed',
-          display: 'flex',
-          alignItems: 'center',
-          gap: '0.5rem',
-          fontWeight: 600,
-          transition: 'all 0.2s',
-          boxShadow: systemState === 'healthy' ? '0 0 10px rgba(255,165,0,0.2)' : 'none'
-        }}
-        onClick={() => triggerFailure('frontend_spike')}
-        disabled={systemState !== 'healthy' || triggering}
-      >
-        <AlertOctagon size={18} />
-        {triggering ? "Injecting..." : "Frontend Traffic Spike"}
-      </button>
-
-      <button 
-        style={{
-          background: 'rgba(0,240,255,0.1)',
-          color: '#00F0FF',
-          border: '1px solid #00F0FF',
-          padding: '0.8rem 1.2rem',
-          borderRadius: '8px',
-          cursor: 'pointer',
-          display: 'flex',
-          alignItems: 'center',
-          gap: '0.5rem',
-          fontWeight: 600,
-        }}
-        onClick={resetSystem}
-      >
-        <RotateCcw size={18} />
-        Reset Demo
-      </button>
-
-      <div style={{ 
-        flex: 1, 
-        padding: '1rem',
-        background: 'rgba(0,0,0,0.3)',
-        borderRadius: '8px',
-        border: '1px solid rgba(255,255,255,0.05)',
-        display: 'flex',
-        flexDirection: 'column',
-        gap: '0.5rem'
-      }}>
-         <h4 style={{ margin: 0, color: '#E2E8F0', fontSize: '0.9rem' }}>Demo Script Control</h4>
-         <p style={{ margin: 0, fontSize: '0.8rem', color: '#8A8F98' }}>
-           Clicking "Inject Failure" will initiate the automated AI RCA and auto-remediation demonstration pipeline directly calling the Python Backend.
-         </p>
+    <div className="chaos-controls">
+      <div className="chaos-form-row">
+        <label>Scenario<select value={scenario} onChange={(event) => {
+          const choice = scenarios.find(([key]) => key === event.target.value);
+          setScenario(event.target.value);
+          setService(choice?.[2] || 'frontend');
+        }}>{scenarios.map(([key, label]) => <option key={key} value={key}>{label}</option>)}</select></label>
+        {requiresTarget && <label>Target service<select value={service} onChange={(event) => setService(event.target.value)}>{serviceOptions.map((name) => <option key={name} value={name}>{name}</option>)}</select></label>}
+        <button className="button-primary" onClick={triggerFailure} disabled={systemState !== 'healthy' || triggering}><AlertOctagon size={15} />{triggering ? 'Injecting…' : 'Inject scenario'}</button>
+        <button className="button-secondary" onClick={resetSystem}><RotateCcw size={15} />Reset demo</button>
       </div>
+      <p className="chaos-policy-note">The background agent detects the sustained signal, analyzes impact, and recovers medium-risk incidents automatically. High-risk changes wait for approval.</p>
+      {selectedScenario && <small className="chaos-selected-note">Selected: {selectedScenario[1]}</small>}
     </div>
   );
 };

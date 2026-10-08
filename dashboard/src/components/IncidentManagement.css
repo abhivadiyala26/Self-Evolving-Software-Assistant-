@@ -1,0 +1,76 @@
+.incident-card-root, .incident-history-root { display: flex; flex-direction: column; gap: 12px; padding: 14px; border: 1px solid var(--line); border-radius: 6px; background: #fff; }
+.incident-card-root.card-failed { border-color: #e4c6c2; }
+.incident-card-empty { display: grid; place-items: center; gap: 6px; min-height: 120px; padding: 22px; text-align: center; }
+.incident-card-empty svg { color: #34745b; }
+.empty-title { color: #354238; font-size: .9rem; font-weight: 650; }
+.empty-sub, .history-empty { margin: 0; color: var(--muted); font-size: .76rem; }
+.card-top-bar, .history-header { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding-bottom: 9px; border-bottom: 1px solid var(--line); }
+.card-header-info, .history-title { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; }
+.incident-id-tag { color: #476451; font-family: ui-monospace, Consolas, monospace; font-size: .76rem; font-weight: 700; }
+.severity-badge, .st-badge, .hist-status-pill { display: inline-flex; align-items: center; gap: 4px; padding: 3px 7px; border: 1px solid #dfe4de; border-radius: 4px; color: #667168; background: #f8f9f7; font-size: .65rem; font-weight: 650; }
+.severity-p1, .st-failed, .status-remediation_failed { color: #a44840; border-color: #e8c9c5; background: #fcf2f0; }
+.severity-p2, .st-remediation, .status-awaiting_approval { color: #8b641d; border-color: #e8dab8; background: #fcf8ee; }
+.severity-p3 { color: #756433; }
+.severity-p4, .st-resolved, .status-resolved { color: #34704d; border-color: #d2e1d5; background: #f1f7f1; }
+.st-investigating, .st-rca, .st-recovering, .status-investigating, .status-rca { color: #506b5b; border-color: #d8e2d9; background: #f5f8f5; }
+.card-duration { display: inline-flex; align-items: center; gap: 5px; color: var(--muted); font-size: .7rem; }
+.card-main-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
+.meta-box { display: grid; gap: 2px; }
+.meta-label { color: #7b857c; font-size: .62rem; letter-spacing: .04em; text-transform: uppercase; }
+.meta-value { overflow: hidden; color: #303a32; font-size: .76rem; font-weight: 600; text-overflow: ellipsis; }
+.highlight-cyan, .highlight-purple, .highlight-green { color: #3e7052; }
+.card-services-section { display: grid; gap: 5px; }
+.services-map-chips { display: grid; gap: 5px; }
+.chip-group { display: flex; align-items: center; gap: 5px; flex-wrap: wrap; }
+.chip-group-label { color: #778178; font-size: .7rem; }
+.svc-chip { display: inline-flex; align-items: center; gap: 4px; padding: 3px 6px; border: 1px solid #e1e5df; border-radius: 4px; color: #59665c; background: #f8f9f7; font-family: ui-monospace, Consolas, monospace; font-size: .64rem; }
+.direct-chip { color: #984f45; border-color: #ecd5d1; background: #fcf6f5; }
+.downstream-chip { color: #80692e; border-color: #e9e0c8; background: #fcfaf4; }
+.card-details-box { display: grid; gap: 7px; padding-top: 9px; border-top: 1px solid #edf0ec; }
+.detail-item { display: grid; grid-template-columns: 115px 1fr; gap: 8px; font-size: .73rem; }
+.detail-title { color: #7a847b; font-weight: 600; }
+.detail-text { color: #3f4941; }
+.failure-banner { display: flex; align-items: center; gap: 8px; padding: 9px; color: #984c43; border: 1px solid #ecd2ce; border-radius: 5px; background: #fcf4f2; font-size: .75rem; }
+.incident-timeline-root { display: flex; flex-direction: column; }
+.empty-timeline { padding: 20px 8px; color: var(--muted); font-size: .76rem; text-align: center; }
+.timeline-list { display: flex; flex-direction: column; }
+.timeline-item { display: flex; gap: 9px; position: relative; padding-bottom: 10px; }
+.timeline-item:last-child { padding-bottom: 0; }
+.timeline-marker { display: flex; flex-direction: column; align-items: center; width: 20px; flex: 0 0 20px; }
+.marker-icon { z-index: 1; display: grid; place-items: center; width: 22px; height: 22px; border: 1px solid #dfe4de; border-radius: 50%; color: #54745f; background: #fff; }
+.timeline-line { width: 1px; flex: 1; margin-top: 3px; background: #dfe4de; }
+.timeline-content { display: grid; flex: 1; gap: 3px; min-width: 0; padding: 6px 8px; border: 1px solid #e5e9e4; border-radius: 4px; background: #fff; }
+.timeline-header { display: flex; justify-content: space-between; gap: 10px; }
+.timeline-title { color: #344037; font-size: .74rem; font-weight: 650; }
+.timeline-time, .timeline-badge { color: #808a81; font-size: .64rem; }
+.timeline-desc { margin: 0; color: #5e695f; font-size: .7rem; }
+.incident-history-root { gap: 12px; }
+.history-title { gap: 7px; }
+.history-title svg { color: #52725c; }
+.history-title h3 { margin: 0; color: #2e3931; font-size: .9rem; }
+.history-count { color: var(--muted); font-size: .72rem; }
+.history-empty { padding: 18px; text-align: center; }
+.history-table-wrapper { overflow-x: auto; }
+.history-table { width: 100%; border-collapse: collapse; text-align: left; font-size: .7rem; }
+.history-table th { padding: 8px; color: #69746b; border-bottom: 1px solid #dfe4de; background: #f7f8f6; white-space: nowrap; }
+.history-table td { padding: 8px; color: #414b43; border-bottom: 1px solid #edf0ec; vertical-align: middle; }
+.history-row { cursor: pointer; }
+.history-row:hover { background: #f7faf6; }
+.root-cause-cell { max-width: 210px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.hist-status-pill { text-transform: uppercase; white-space: nowrap; }
+.btn-view-details { display: inline-flex; align-items: center; gap: 4px; padding: 4px 7px; color: #476b53; border: 1px solid #d8e2d9; border-radius: 4px; background: #fff; font-size: .67rem; cursor: pointer; }
+.incident-history-root .modal-backdrop { position: fixed; inset: 0; z-index: 1000; display: grid; place-items: center; padding: 20px; background: rgba(25, 32, 27, .32); }
+.incident-history-root .modal-content { display: flex; flex-direction: column; width: min(700px, 100%); max-height: 88vh; overflow: hidden; border: 1px solid #dfe4de; border-radius: 8px; background: #fff; box-shadow: 0 18px 55px #1b251a1c; }
+.incident-history-root .modal-header { position: sticky; top: 0; display: flex; align-items: center; justify-content: space-between; padding: 12px 15px; border-bottom: 1px solid var(--line); background: #fff; }
+.modal-title-group { display: flex; align-items: center; gap: 9px; }
+.modal-title-group h3 { margin: 0; font-size: .9rem; }
+.modal-close-btn { display: inline-flex; align-items: center; justify-content: center; min-width: 30px; min-height: 30px; color: #69746b; border: 1px solid var(--line); border-radius: 5px; background: #fff; cursor: pointer; }
+.incident-history-root .modal-body { display: flex; flex-direction: column; gap: 12px; overflow: auto; padding: 15px; }
+.modal-meta-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; padding: 10px; border: 1px solid var(--line); border-radius: 5px; background: #f8f9f7; }
+.modal-meta-item { display: flex; justify-content: space-between; gap: 8px; font-size: .72rem; }
+.modal-meta-item .label, .modal-section h4 { color: #758077; }
+.modal-meta-item .val { color: #374139; font-weight: 600; }
+.modal-section { display: grid; gap: 5px; }
+.modal-section h4 { margin: 0; font-size: .68rem; letter-spacing: .04em; text-transform: uppercase; }
+.modal-text { margin: 0; padding: 8px; color: #3d483f; border: 1px solid #e6eae5; border-radius: 4px; background: #fbfcfa; font-size: .75rem; }
+@media (max-width: 650px) { .card-main-grid { grid-template-columns: 1fr 1fr; } .detail-item { grid-template-columns: 1fr; gap: 2px; } .modal-meta-grid { grid-template-columns: 1fr; } .timeline-header { flex-direction: column; gap: 1px; } }

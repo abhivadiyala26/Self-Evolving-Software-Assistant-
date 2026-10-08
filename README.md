@@ -1,48 +1,35 @@
-# Automonus-SRE
+# AutoSRE Shop
 
-An Autonomous SRE (Site Reliability Engineering) Multi-Agent Orchestrator designed to detect, analyze, diagnose, and remediate simulated system outages on a boutique microservice simulator.
+AutoSRE Shop pairs an Indian e-commerce demo with an admin-only, multi-agent SRE console. The storefront uses INR and a 39-item catalog. A backend-owned monitor runs continuously while FastAPI is running, independent of dashboard sessions, and evaluates service health, latency, request volume, errors, CPU, memory, and dependency impact.
 
----
+## Run locally
 
-## 🏗️ Project Architecture
+Start the backend from the project root:
 
-The system is split into a Python FastAPI backend and a React + Vite frontend dashboard:
-
-*   **FastAPI Backend ([`main.py`](file:///c:/Users/vijay/Documents/Autmonous%20SRE/main.py))**: Coordinates the SRE workflow and provides APIs to inject chaos and poll metrics/logs. Located at [`main.py`](file:///c:/Users/vijay/Documents/Autmonous%20SRE/main.py).
-*   **Multi-Agent Workflow ([`agents/`](file:///c:/Users/vijay/Documents/Autmonous%20SRE/agents))**: Specialized AI SRE agents collaborating in a pipeline. Located at [`agents/`](file:///c:/Users/vijay/Documents/Autmonous%20SRE/agents):
-    *   [Monitoring Agent](file:///c:/Users/vijay/Documents/Autmonous%20SRE/agents/monitoring_agent.py): Performs metric anomaly detection.
-    *   [Analysis Agent](file:///c:/Users/vijay/Documents/Autmonous%20SRE/agents/analysis_agent.py): Parses error logs and summarizes issues.
-    *   [RCA Agent](file:///c:/Users/vijay/Documents/Autmonous%20SRE/agents/rca_agent.py): Diagnoses the root cause.
-    *   [Remediation Agent](file:///c:/Users/vijay/Documents/Autmonous%20SRE/agents/remediation_agent.py): Determines the remediation strategy.
-    *   [Deployment Agent](file:///c:/Users/vijay/Documents/Autmonous%20SRE/agents/deployment_agent.py): Executes deployment / Kubernetes sync.
-*   **Boutique Simulator ([`services/`](file:///c:/Users/vijay/Documents/Autmonous%20SRE/services))**: Simulates traffic, metrics, and logs for boutique microservices. Located at [`services/`](file:///c:/Users/vijay/Documents/Autmonous%20SRE/services).
-*   **React Frontend Dashboard ([`dashboard/`](file:///c:/Users/vijay/Documents/Autmonous%20SRE/dashboard))**: A rich real-time UI showing system state, service metrics, agent logs, and chaos injection controls. Located at [`dashboard/`](file:///c:/Users/vijay/Documents/Autmonous%20SRE/dashboard).
-
----
-
-## 🚀 Getting Started
-
-### 1. Run the Backend
-Ensure you have the virtual environment activated:
 ```powershell
-.\venv\Scripts\Activate.ps1
+python -m pip install fastapi uvicorn pydantic
 python main.py
 ```
-*The backend API will run on `http://localhost:8000`.*
 
-### 2. Run the Dashboard Frontend
-Navigate to the dashboard directory, install dependencies, and start the development server:
+Start the storefront in another terminal:
+
 ```powershell
 cd dashboard
 npm install
 npm run dev
 ```
-*Open `http://localhost:5173` in your browser.*
 
----
+Open `http://localhost:5173`. The API runs at `http://localhost:8000`.
 
-## ⚡ Chaos Engineering & Self-Healing
-You can trigger chaos scenarios (e.g. `payment_crash`) from the Dashboard UI or via API:
-*   **API Trigger Endpoint**: `POST http://localhost:8000/api/trigger_chaos`
-*   Once chaos is injected, the **Autonomous SRE Pipeline** kicks in to detect anomalies, analyze logs, identify the root cause, propose/apply a fix, and recover the system automatically.
+## Demo accounts
 
+- Admin: `admin@technogear.com` / `password`
+- Storefront user: create an account at `/login`, or use the demo data shortcut on that page.
+
+Admin routes require a backend-issued token. The admin console is at `/dashboard`; alerts, logs, metrics, services, agents, incidents, and history have their own routes. The `/api/agent/status` endpoint reports the background monitor state, last cycle, service count, recovery/escalation totals, and recent activity. The simulator models frontend, authentication, cart, checkout/order, product, recommendation, payment, shipping, and database services. The chaos controls include payment crash/high latency, frontend traffic spike, database failure, targeted service stops, API error spikes, CPU/memory pressure, network timeouts, and reset.
+
+The monitor waits for sustained threshold signals before starting analysis. Low- and medium-risk incidents use bounded simulated recovery and post-recovery verification automatically. High- and critical-risk actions wait for admin approval; three failed automatic attempts escalate to approval. Rejection leaves the incident open for manual action. Store orders are blocked while checkout or payment is unhealthy. The admin console and storefront use a light, compact layout with horizontal console navigation.
+
+## Demo data and limits
+
+This repository does not configure a database or real payment, cloud, or Kubernetes integrations. Service telemetry, alerts, incidents, logs, orders, and admin sessions are in memory and reset when the backend process restarts. The product catalog and customer cart, wishlist, and demo user profile are local frontend data. Admin credentials are fixed demo credentials; user signup stores demo credentials in browser local storage. Use this setup for local demonstration, not production accounts or payments.

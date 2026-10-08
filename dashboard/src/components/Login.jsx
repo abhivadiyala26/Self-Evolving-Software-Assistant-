@@ -12,23 +12,50 @@ const Login = () => {
 
   const handleRoleSelect = (selectedRole) => setRole(selectedRole);
 
-  const handleSubmit = (e) => {
+  const handleSubmit = async (e) => {
     e.preventDefault();
     setError('');
 
     if (isLogin) {
+      if (role === 'admin') {
+        try {
+          const res = await fetch('http://localhost:8000/api/auth/login', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ email: formData.email, password: formData.password })
+          });
+          const data = await res.json();
+          if (!res.ok) {
+            const message = res.status === 401
+              ? 'Invalid admin credentials. Use the demo password “password”.'
+              : data.detail || 'Admin sign-in failed.';
+            throw new Error(message);
+          }
+          localStorage.setItem('adminToken', data.token);
+          localStorage.setItem('currentUser', JSON.stringify({ email: formData.email, name: data.name, role: 'admin' }));
+          navigate('/dashboard');
+        } catch (err) {
+          setError(err.message || 'Could not reach the AutoSRE backend.');
+        }
+        return;
+      }
+      localStorage.removeItem('adminToken');
       // Mock Login
       const users = JSON.parse(localStorage.getItem('users') || '[]');
       const user = users.find(u => u.email === formData.email && u.password === formData.password && u.role === role);
       
       if (user) {
         localStorage.setItem('currentUser', JSON.stringify(user));
-        // Admin and User both redirect to store now, as Admin has the sidebar
+        // Store users return to ShopSphere after sign-in.
         navigate('/');
       } else {
         setError('Invalid credentials or incorrect role selected.');
       }
     } else {
+      if (role === 'admin') {
+        setError('Admin accounts are provisioned for the demo. Sign in with the provided admin account.');
+        return;
+      }
       // Mock Signup
       const users = JSON.parse(localStorage.getItem('users') || '[]');
       if (users.find(u => u.email === formData.email)) {
@@ -43,7 +70,7 @@ const Login = () => {
       // Auto login after signup
       localStorage.setItem('currentUser', JSON.stringify(newUser));
       
-      // Both admin and user go to Storefront since Admin has the global sidebar panel
+      // New customer accounts start in ShopSphere.
       navigate('/');
     }
   };
@@ -52,9 +79,9 @@ const Login = () => {
     <div className="login-root">
       <div className="login-container animate-fade-in">
         <div className="login-header">
-          <Zap color="#00F0FF" size={32} />
+          <Zap size={28} />
           <h2>{isLogin ? 'Welcome Back' : 'Create Account'}</h2>
-          <p>Access the TechnoGear Network.</p>
+          <p>Sign in to ShopSphere or open the AutoSRE admin console.</p>
         </div>
 
         {error && <div className="login-error">{error}</div>}
@@ -75,6 +102,19 @@ const Login = () => {
             <Shield size={18} /> Admin
           </button>
         </div>
+
+        {isLogin && role === 'admin' && (
+          <button
+            type="button"
+            className="demo-credential-button"
+            onClick={() => {
+              setFormData((current) => ({ ...current, email: 'admin@technogear.com', password: 'password' }));
+              setError('');
+            }}
+          >
+            Fill demo admin email and password
+          </button>
+        )}
 
         <form className="login-form" onSubmit={handleSubmit}>
           {!isLogin && (
@@ -126,19 +166,17 @@ const Login = () => {
           </p>
         </div>
         
-        {/* Temporary shortcut helper for reviewers */}
-        <div style={{marginTop: '2rem', fontSize: '0.75rem', color: '#4A5568', textAlign: 'center'}}>
-          <p>Demo accounts (auto-configured):<br/>admin@technogear.com (Admin) | demo@technogear.com (User)</p>
+        <div className="login-demo-note">
+          <p>Demo accounts:<br/>admin@technogear.com / password (Admin) | demo@shopsphere.in / password (User)</p>
           <button 
             type="button" 
+            className="login-demo-inject"
             onClick={() => {
                localStorage.setItem('users', JSON.stringify([
-                 {email: 'admin@technogear.com', password: 'password', role: 'admin', name: 'Admin'},
-                 {email: 'demo@technogear.com', password: 'password', role: 'user', name: 'Demo User'}
+                 {email: 'demo@shopsphere.in', password: 'password', role: 'user', name: 'Demo User'}
                ]));
-               alert("Demo accounts injected into localStorage!");
+               alert("Demo user account is ready. Admin sign-in is verified by the backend.");
             }}
-            style={{background:'none', border:'1px solid #4A5568', color:'#4A5568', fontSize:'0.7rem', marginTop:'0.5rem', cursor: 'pointer', borderRadius: '4px', padding:'2px 5px'}}
           >
              Inject Demo Data
           </button>

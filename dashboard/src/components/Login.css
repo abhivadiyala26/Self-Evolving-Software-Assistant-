@@ -1,159 +1,25 @@
-.login-root {
-  min-height: 100vh;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background-color: #060608;
-  background-image: radial-gradient(circle at 50% 50%, rgba(0, 240, 255, 0.05) 0%, transparent 50%);
-  font-family: 'Inter', sans-serif;
-  color: #FFFFFF;
-}
-
-.login-container {
-  width: 100%;
-  max-width: 420px;
-  background: #13141F;
-  border: 1px solid rgba(255,255,255,0.05);
-  border-radius: 16px;
-  padding: 2.5rem;
-  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.5);
-}
-
-.login-header {
-  text-align: center;
-  margin-bottom: 2rem;
-}
-
-.login-header h2 {
-  font-size: 1.8rem;
-  margin: 1rem 0 0.5rem 0;
-  color: #E2E8F0;
-}
-
-.login-header p {
-  color: #A0AEC0;
-  font-size: 0.9rem;
-  margin: 0;
-}
-
-.login-error {
-  background: rgba(255, 51, 102, 0.1);
-  color: #FF3366;
-  padding: 0.8rem;
-  border-radius: 8px;
-  font-size: 0.85rem;
-  margin-bottom: 1.5rem;
-  border: 1px solid rgba(255, 51, 102, 0.3);
-  text-align: center;
-}
-
-/* User / Admin Bubbles */
-.role-selector {
-  display: flex;
-  gap: 1rem;
-  margin-bottom: 2rem;
-  background: rgba(0, 0, 0, 0.3);
-  padding: 0.4rem;
-  border-radius: 12px;
-  border: 1px solid rgba(255,255,255,0.05);
-}
-
-.role-btn {
-  flex: 1;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 0.5rem;
-  background: transparent;
-  color: #A0AEC0;
-  border: none;
-  padding: 0.8rem;
-  border-radius: 8px;
-  font-weight: 600;
-  font-size: 0.9rem;
-  cursor: pointer;
-  transition: all 0.3s ease;
-}
-
-.role-btn.active.user-btn {
-  background: rgba(0, 240, 255, 0.15);
-  color: #00F0FF;
-  box-shadow: 0 0 15px rgba(0, 240, 255, 0.2);
-}
-
-.role-btn.active.admin-btn {
-  background: rgba(255, 0, 127, 0.15);
-  color: #FF007F;
-  box-shadow: 0 0 15px rgba(255, 0, 127, 0.2);
-}
-
-/* Form Styling */
-.login-form {
-  display: flex;
-  flex-direction: column;
-  gap: 1.2rem;
-}
-
-.form-group {
-  display: flex;
-  flex-direction: column;
-  gap: 0.4rem;
-}
-
-.form-group label {
-  font-size: 0.85rem;
-  color: #A0AEC0;
-  font-weight: 500;
-}
-
-.form-group input {
-  background: rgba(0, 0, 0, 0.3);
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  color: #FFFFFF;
-  padding: 0.8rem 1rem;
-  border-radius: 8px;
-  font-size: 0.95rem;
-  transition: all 0.2s;
-}
-
-.form-group input:focus {
-  outline: none;
-  border-color: #00F0FF;
-  box-shadow: 0 0 0 3px rgba(0, 240, 255, 0.1);
-}
-
-.login-submit {
-  margin-top: 1rem;
-  background: linear-gradient(90deg, #00F0FF, #7000FF);
-  color: white;
-  border: none;
-  padding: 1rem;
-  border-radius: 8px;
-  font-weight: 700;
-  font-size: 1rem;
-  cursor: pointer;
-  transition: transform 0.2s, box-shadow 0.2s;
-}
-
-.login-submit:hover {
-  transform: translateY(-2px);
-  box-shadow: 0 10px 20px rgba(0, 240, 255, 0.3);
-}
-
-.login-footer {
-  margin-top: 2rem;
-  text-align: center;
-  font-size: 0.9rem;
-  color: #A0AEC0;
-}
-
-.toggle-mode {
-  color: #00F0FF;
-  font-weight: 600;
-  cursor: pointer;
-  transition: color 0.2s;
-}
-
-.toggle-mode:hover {
-  color: #FFFFFF;
-}
+.login-root { min-height: 100vh; display: grid; place-items: center; padding: 24px; background: #f3f4f1; color: #202722; }
+.login-container { width: min(100%, 420px); padding: 34px; background: #fff; border: 1px solid #dfe4de; border-radius: 10px; box-shadow: 0 12px 32px rgba(28, 42, 33, .05); }
+.login-header { text-align: center; margin-bottom: 26px; }
+.login-header svg { color: #34745b; }
+.login-header h2 { margin: 10px 0 5px; font-size: 1.65rem; letter-spacing: -.04em; }
+.login-header p { margin: 0; color: #6c756e; font-size: .92rem; }
+.login-error { margin-bottom: 18px; padding: 10px 12px; border: 1px solid #e7c3bf; border-radius: 6px; background: #fcf2f0; color: #963f38; font-size: .86rem; }
+.role-selector { display: flex; gap: 4px; margin-bottom: 20px; padding: 4px; border: 1px solid #e1e5e0; border-radius: 7px; background: #f7f8f6; }
+.role-btn { flex: 1; display: flex; align-items: center; justify-content: center; gap: 7px; padding: 9px; color: #667069; border: 0; border-radius: 5px; background: transparent; font-weight: 600; cursor: pointer; }
+.role-btn.active.user-btn, .role-btn.active.admin-btn { color: #2e684f; background: #eaf2ec; box-shadow: none; }
+.demo-credential-button { display: block; margin: -8px 0 16px auto; padding: 5px 8px; color: #34745b; border: 1px solid #cbd9ce; border-radius: 5px; background: #f7faf7; font-size: .76rem; cursor: pointer; }
+.login-form { display: flex; flex-direction: column; gap: 16px; }
+.form-group { display: flex; flex-direction: column; gap: 6px; }
+.form-group label { color: #505b53; font-size: .83rem; font-weight: 600; }
+.form-group input { width: 100%; padding: 11px 12px; color: #202722; border: 1px solid #d8ded8; border-radius: 6px; background: #fff; }
+.form-group input:focus { outline: 0; border-color: #6c9b80; box-shadow: 0 0 0 3px #edf4ef; }
+.login-submit { margin-top: 4px; padding: 11px 14px; color: #fff; border: 1px solid #34745b; border-radius: 6px; background: #34745b; font-weight: 650; cursor: pointer; }
+.login-submit:hover { background: #2d654f; }
+.login-footer { margin-top: 22px; text-align: center; color: #68726b; font-size: .88rem; }
+.login-footer p { margin: 0; }
+.toggle-mode { color: #34745b; font-weight: 650; cursor: pointer; }
+.login-demo-note { margin-top: 24px; color: #788179; text-align: center; font-size: .75rem; }
+.login-demo-note p { margin-bottom: 8px; }
+.login-demo-inject { padding: 4px 7px; color: #667069; border: 1px solid #d8ded8; border-radius: 4px; background: transparent; font-size: .72rem; cursor: pointer; }
+@media (max-width: 480px) { .login-container { padding: 25px 20px; } }
