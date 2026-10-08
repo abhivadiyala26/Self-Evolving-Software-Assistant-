@@ -229,16 +229,21 @@ async def background_monitor_loop():
 async def automatic_demo_failure_loop():
     """Inject one demo crash at a time and let the regular monitor/recovery pipeline handle it."""
     global current_system_state
+    demo_generation = runtime_generation
     await asyncio.sleep(DEMO_FAILURE_START_DELAY_SECONDS)
+    if demo_generation != runtime_generation:
+        return
     sequence = DEMO_FAILURE_SERVICES[:DEMO_FAILURE_COUNT]
 
     for target_service in sequence:
-        while (
+        while demo_generation == runtime_generation and (
             current_system_state != "healthy"
             or incident_manager.get_active_incident() is not None
             or any(status != "healthy" for status in simulator.service_states.values())
         ):
             await asyncio.sleep(1)
+        if demo_generation != runtime_generation:
+            return
 
         background_agent["demo_failure_current_service"] = target_service
         current_system_state = "anomaly"
@@ -250,12 +255,14 @@ async def automatic_demo_failure_loop():
             f"Injected a demo crash for {target_service}; the service is DOWN and the monitoring pipeline will detect it.",
         )
 
-        while (
+        while demo_generation == runtime_generation and (
             simulator.service_states.get(target_service) != "healthy"
             or incident_manager.get_active_incident() is not None
             or current_system_state != "healthy"
         ):
             await asyncio.sleep(1)
+        if demo_generation != runtime_generation:
+            return
 
         background_agent["demo_failures_completed"] += 1
         background_agent["demo_failure_current_service"] = None
@@ -267,11 +274,8 @@ async def automatic_demo_failure_loop():
 
 @app.post("/api/auth/login")
 async def admin_login(credentials: AdminLogin):
-    # Demo credentials are deliberately fixed for the college demonstration.
-    if simulator.service_states.get("frontend") != "healthy":
-        raise HTTPException(status_code=503, detail="Frontend service is temporarily unavailable.")
-    if simulator.service_states.get("authservice") != "healthy":
-        raise HTTPException(status_code=503, detail="Authentication service is unavailable.")
+    # Admin access is part of the control plane and must remain available while
+    # a simulated storefront or auth service outage is being investigated.
     if credentials.email.lower() != "admin@technogear.com" or credentials.password != "password":
         raise HTTPException(status_code=401, detail="Invalid admin credentials.")
     token = secrets.token_urlsafe(32)
@@ -410,7 +414,17 @@ async def reset_demo(admin: bool = Depends(require_admin)):
     monitor_violation_streaks.clear()
     processed_incidents.clear()
     processing_incidents.clear()
-    background_agent.update({"status": "running", "auto_recoveries": 0, "escalations": 0, "last_action": "Demo reset; monitoring resumed", "activity": []})
+    automatic_demo_crashes.clear()
+    automatic_demo_incidents.clear()
+    background_agent.update({
+        "status": "running",
+        "auto_recoveries": 0,
+        "escalations": 0,
+        "last_action": "Demo reset; monitoring resumed",
+        "activity": [],
+        "demo_failures_completed": 0,
+        "demo_failure_current_service": None,
+    })
     return {"status": "reset"}
 
 @app.post("/api/trigger_chaos")
