@@ -53,6 +53,9 @@ DEMO_FAILURE_COUNT = min(_read_demo_failure_count(), len(DEMO_FAILURE_SERVICES))
 DEMO_FAILURE_START_DELAY_SECONDS = _read_demo_seconds("AUTOSRE_DEMO_START_DELAY_SECONDS", 20)
 DEMO_FAILURE_MIN_DOWN_SECONDS = _read_demo_seconds("AUTOSRE_DEMO_MIN_DOWN_SECONDS", 12)
 DEMO_FAILURE_RECOVERY_PAUSE_SECONDS = _read_demo_seconds("AUTOSRE_DEMO_RECOVERY_PAUSE_SECONDS", 15)
+AUTO_DEMO_FAILURES_ENABLED = os.getenv("AUTOSRE_DEMO_FAILURES_ENABLED", "false").strip().lower() in {
+    "1", "true", "yes", "on"
+}
 automatic_demo_incidents = {}
 automatic_demo_crashes = {}
 
@@ -60,7 +63,10 @@ automatic_demo_crashes = {}
 async def startup_event():
     asyncio.create_task(simulator.run(add_log))
     asyncio.create_task(background_monitor_loop())
-    asyncio.create_task(automatic_demo_failure_loop())
+    if AUTO_DEMO_FAILURES_ENABLED:
+        asyncio.create_task(automatic_demo_failure_loop())
+    else:
+        background_agent["last_action"] = "Automatic failure demo is disabled; use the admin console to inject a scenario."
 
 # Allow CORS for React dashboard
 app.add_middleware(
@@ -229,6 +235,8 @@ async def background_monitor_loop():
 async def automatic_demo_failure_loop():
     """Inject one demo crash at a time and let the regular monitor/recovery pipeline handle it."""
     global current_system_state
+    if not AUTO_DEMO_FAILURES_ENABLED:
+        return
     demo_generation = runtime_generation
     await asyncio.sleep(DEMO_FAILURE_START_DELAY_SECONDS)
     if demo_generation != runtime_generation:
