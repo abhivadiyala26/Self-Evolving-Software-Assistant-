@@ -5,7 +5,13 @@ venv/
 .env
 .env.*
 !.env.example
+.pytest_cache/
+.coverage
+coverage/
+*.log
 data/
-dashboard/node_modules/
+.vite/
+**/__pycache__/
+**/node_modules/
 dashboard/dist/
 dashboard/.codex-build-check/

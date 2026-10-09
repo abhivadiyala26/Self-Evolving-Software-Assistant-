@@ -15,7 +15,7 @@ from uuid import uuid4
 from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
-from services.database import AuthSession, User
+from backend.services.database import AuthSession, User
 
 
 EMAIL_PATTERN = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")

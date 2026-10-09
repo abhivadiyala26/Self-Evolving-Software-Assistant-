@@ -12,11 +12,11 @@ from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import sessionmaker
 
-import main
-import services.database as database
-from services.auth import AuthSession, User, hash_password, verify_password
-from services.database import Base, Order
-from services.recovery_policy import classify_recovery_risk, critical_metrics_sustained
+from backend import app as main
+import backend.services.database as database
+from backend.services.auth import AuthSession, User, hash_password, verify_password
+from backend.services.database import Base, Order
+from backend.services.recovery_policy import classify_recovery_risk, critical_metrics_sustained
 
 
 async def _idle_worker():
@@ -66,7 +66,7 @@ class AutoSRERegressionTests(unittest.TestCase):
         Base.metadata.drop_all(bind=self.engine)
         Base.metadata.create_all(bind=self.engine)
         with self.session_factory() as db:
-            from services.auth import provision_configured_admin
+            from backend.services.auth import provision_configured_admin
 
             provision_configured_admin(db)
         main.database_ready = True
@@ -209,7 +209,7 @@ class AutoSRERegressionTests(unittest.TestCase):
     def test_missing_admin_environment_shows_configuration_instructions(self):
         with patch.dict(os.environ, {"AUTOSRE_ADMIN_EMAIL": "", "AUTOSRE_ADMIN_PASSWORD": ""}), \
              patch.object(database, "SessionLocal", None), patch.object(main, "database_ready", False):
-            from services.auth import configure_demo_accounts
+            from backend.services.auth import configure_demo_accounts
 
             configure_demo_accounts()
             info = self.client.get("/api/auth/demo-info").json()
@@ -220,12 +220,12 @@ class AutoSRERegressionTests(unittest.TestCase):
             self.assertIn("AUTOSRE_ADMIN_EMAIL", info["admin_message"])
             self.assertEqual(response.status_code, 503)
             self.assertIn("AUTOSRE_ADMIN_PASSWORD", response.json()["detail"])
-        from services.auth import configure_demo_accounts
+        from backend.services.auth import configure_demo_accounts
 
         configure_demo_accounts()
 
     def test_public_demo_suggestions_match_working_database_free_accounts(self):
-        from services.auth import PUBLIC_DEMO_ACCOUNTS, configure_demo_accounts
+        from backend.services.auth import PUBLIC_DEMO_ACCOUNTS, configure_demo_accounts
 
         with patch.object(database, "SessionLocal", None), patch.object(main, "database_ready", False), patch.object(main, "DATABASE_CONFIGURED", False):
             configure_demo_accounts(allow_public_demo=True)

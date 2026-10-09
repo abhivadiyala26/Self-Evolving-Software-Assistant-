@@ -1,57 +1,107 @@
-# AutoSRE Shop
+# AutoSRE: Autonomous Multi-Agent Incident Management and Recovery Platform
 
-AutoSRE Shop pairs an Indian e-commerce demo with an admin-only, multi-agent SRE console. The storefront uses INR and a 39-item catalog. A backend-owned monitor runs continuously while FastAPI is running, independent of dashboard sessions, and evaluates service health, latency, request volume, errors, CPU, memory, and dependency impact.
+AutoSRE is a service-monitoring and incident-management demo. It detects health and telemetry anomalies, investigates likely causes, recommends recovery actions, and verifies recovery. Bounded actions can run automatically; higher-risk actions wait for administrator approval. The demo is integrated with ShopSphere, an Indian e-commerce storefront backed by logical, simulated services.
 
-## Run locally
+## Key features
 
-Start the backend from the project root:
+- Continuous health and telemetry monitoring while the backend process is running
+- Incident, alert, log, and service views with an investigation timeline
+- A staged, rule-based agent workflow for analysis, root-cause classification, and remediation
+- Risk-bounded automatic recovery, administrator approval for higher-risk actions, and post-action health checks
+- ShopSphere storefront, account flows, cart, and order demonstration
 
-```powershell
-$env:AUTOSRE_ADMIN_EMAIL = "admin@example.com"
-$env:AUTOSRE_ADMIN_PASSWORD = "<your-private-password-of-12-to-128-characters>"
-$env:DEMO_USER_EMAIL = "demo@example.com"
-$env:DEMO_USER_PASSWORD = "<your-private-password-of-8-to-128-characters>"
-python -m pip install -r requirements.txt
-python main.py
+## Architecture
+
+```mermaid
+flowchart LR
+    Shopper --> Frontend[ShopSphere and AutoSRE dashboard]
+    Frontend --> API[FastAPI backend]
+    API --> Sim[In-process service simulator]
+    Sim --> Telemetry[Metrics and health samples]
+    Telemetry --> Monitor[Background monitor]
+    Monitor --> Agents[Analysis, RCA, and remediation agents]
+    Agents --> Incidents[Incident and risk workflow]
+    Incidents --> Approval{Admin approval required?}
+    Approval -->|No| Recovery[Simulated recovery action]
+    Approval -->|Yes| Recovery
+    Recovery --> Verify[Post-recovery health verification]
+    API -. optional persistence .-> DB[(SQLite or configured SQL database)]
 ```
 
-Start the storefront in another terminal:
+The FastAPI process, monitor, incident workflow, and service simulator are real application code. The e-commerce microservices and recovery operations are simulated in-process; this repository does not operate Kubernetes, cloud infrastructure, or a payment gateway.
+
+## Technology
+
+- **Frontend:** React, Vite, React Router, Recharts, Lucide
+- **Backend:** Python, FastAPI, Uvicorn, SQLAlchemy
+- **Storage:** SQLite locally by default; PostgreSQL is supported through `DATABASE_URL`. Database-free demo mode uses temporary in-memory accounts and incident data.
+- **Tests:** Python `unittest`, FastAPI `TestClient`, HTTPX; frontend ESLint and Vite build scripts
+- **Hosting:** Vercel frontend and Render API
+
+## Project structure
+
+```text
+.
+├── backend/                 # FastAPI app, agents, services, tests, Python dependencies
+├── dashboard/               # React/Vite frontend (Vercel project root)
+├── docs/                    # Architecture notes
+├── main.py                  # Render-compatible entry point
+├── requirements.txt         # Render-compatible include of backend dependencies
+└── README.md
+```
+
+The frontend directory remains named `dashboard/` to match the existing Vercel root-directory setting.
+
+## Getting started
+
+Use Python 3.10 or newer and Node.js with npm.
+
+```powershell
+git clone https://github.com/abhivadiyala26/Self-Evolving-Software-Assistant-.git
+cd Self-Evolving-Software-Assistant-
+python -m pip install -r backend/requirements-dev.txt
+python -m uvicorn backend.app:app --reload --port 8000
+```
+
+In a second terminal:
 
 ```powershell
 cd dashboard
-npm install
+npm ci
+Copy-Item .env.example .env.local
 npm run dev
 ```
 
-Open `http://localhost:5173`. The API runs at `http://localhost:8000`.
+The UI runs at `http://localhost:5173`; the API runs at `http://localhost:8000`. Vite loads `.env.local` automatically. Set `VITE_API_BASE_URL` to the backend origin, without `/api`.
 
-The backend uses `data/autosre.db` (SQLite) locally when no database URL is set. The configured admin uses `AUTOSRE_ADMIN_EMAIL` and `AUTOSRE_ADMIN_PASSWORD` (12–128 characters); the optional fixed demo user uses `DEMO_USER_EMAIL` and `DEMO_USER_PASSWORD` (8–128 characters). Credentials are checked and hashed by the backend; no demo passwords are shipped in frontend code. When no database is available, signups create temporary server-side demo accounts that disappear when the backend restarts. When local SQLite or another database is ready, signups are persistent. The login page states which mode is active and reports missing demo account configuration.
+## Configuration
 
-Admin routes require a backend-issued token. The admin console is at `/dashboard`; alerts, logs, metrics, services, agents, incidents, and history have their own routes. The `/api/agent/status` endpoint reports the background monitor state, last cycle, service count, recovery/escalation totals, and recent activity. The simulator models frontend, authentication, cart, checkout/order, product, recommendation, payment, shipping, and database services. The chaos controls include payment crash/high latency, frontend traffic spike, database failure, targeted service stops, API error spikes, CPU/memory pressure, network timeouts, and reset.
+Use `dashboard/.env.example` as the Vite environment template. Backend values in `backend/.env.example` are safe references for process variables; the app does not load a `.env` file itself. Set values in your shell, IDE, or hosting provider. The backend creates `data/autosre.db` locally by default. Set `DATABASE_URL` (or `AUTOSRE_DATABASE_URL`) for durable database-backed accounts and orders, and set `AUTOSRE_CORS_ORIGINS` to the exact frontend origins. For a private admin account, configure `AUTOSRE_ADMIN_EMAIL` and a private `AUTOSRE_ADMIN_PASSWORD` of at least 12 characters.
 
-The monitor distinguishes severity from recovery risk. Service crashes and other supported bounded actions can recover automatically even for P1 incidents. Approval is based on the proposed action, configured safety limits, blast radius, and retry outcomes. Default telemetry settings are a 300 ms warning latency, a 500 ms critical latency threshold sustained for 15 seconds, a 20% critical error rate sustained for 15 seconds, a maximum of four simulated replicas, and three automatic attempts. Set `AUTOSRE_WARNING_LATENCY_MS`, `AUTOSRE_CRITICAL_LATENCY_MS`, `AUTOSRE_CRITICAL_ERROR_RATE_PERCENT`, `AUTOSRE_CRITICAL_WINDOW_SECONDS`, `AUTOSRE_SAFE_REPLICA_LIMIT`, and `AUTOSRE_AUTOMATIC_RECOVERY_ATTEMPTS` to tune these demo values. Recovery remains simulated; this repository does not issue real Kubernetes, cloud, or payment operations. The verifier checks only the affected service set over three consecutive samples. Rejection leaves the incident open for manual action.
+## Authentication and demo limits
 
-Persistent orders and account records require a configured database. Each order is tied to the authenticated account, and checkout retries use an idempotency key. In database-free demo mode, authentication still works with the fixed environment-configured demo accounts and temporary signups; order endpoints return a clear storage-unavailable response instead of claiming an order was placed. With a database, card, UPI, and net banking orders are recorded as `payment_pending_demo`; the app has no payment gateway and does not charge cards. Cash-on-delivery demo orders progress through the sample delivery states. Incident history, alerts, logs, service telemetry, and temporary accounts remain in process memory and reset after a backend restart.
+Admin access uses a separate backend role and server-checked session; normal users cannot access admin APIs. On the deployed Render service, public demo credentials are exposed through the login suggestions only when no `DATABASE_URL` is configured. They are intentionally public demo accounts, not private administrator credentials. Signup accounts, incidents, telemetry, logs, and alerts are temporary in database-free mode and reset when the backend restarts. Persistent account and order storage requires a configured database. Payments and service recovery remain simulated.
 
-Automatic service-failure demos are disabled by default so a backend restart does not take the storefront offline. Use the admin console's chaos controls to start a scenario manually. To run the automatic sequence on purpose, set `AUTOSRE_DEMO_FAILURES_ENABLED=true` in the backend environment; the service order and timing can be tuned with `AUTOSRE_DEMO_FAILURE_SERVICES`, `AUTOSRE_DEMO_FAILURE_COUNT`, `AUTOSRE_DEMO_START_DELAY_SECONDS`, `AUTOSRE_DEMO_MIN_DOWN_SECONDS`, and `AUTOSRE_DEMO_RECOVERY_PAUSE_SECONDS`.
+## Tests
 
-## Configure the existing deployment
-
-The existing Vercel frontend is `https://self-evolving-assistant-zeta.vercel.app`; its build root is `dashboard`. The existing Render API is `https://autosre-api.onrender.com`. Keep `VITE_API_BASE_URL` in Vercel set to the backend origin without `/api`, for example `https://autosre-api.onrender.com`.
-
-The existing Render service can run without a database for the college-project demo. When Render has no `DATABASE_URL`, the backend enables two intentional public demo accounts; the login page fetches only those demo credentials for its suggestion buttons. They are not production credentials, and configured private admin passwords are never returned by the demo-info endpoint. The public accounts are disabled when a database URL is configured.
-
-- `AUTOSRE_ADMIN_EMAIL` and `AUTOSRE_ADMIN_PASSWORD`: optional private admin credentials (12–128 characters).
-- `DEMO_USER_EMAIL` and `DEMO_USER_PASSWORD`: optional private demo-user credentials (8–128 characters).
-- `AUTOSRE_CORS_ORIGINS`: `https://self-evolving-assistant-zeta.vercel.app` (comma-separate any additional exact frontend origins you use).
-
-Render will restart the existing backend after environment changes. Keep the frontend's `VITE_API_BASE_URL` pointing at the Render service. Pushing frontend code to the connected `main` branch triggers Vercel; pushing backend code triggers Render. `DATABASE_URL` is optional for demo sign-in and admin controls. It is needed only for persistent new accounts and order history; those features return an explicit unavailable response in database-free mode. Temporary signups and sessions are in process memory and can disappear on restart or when Render replaces the instance.
-
-The local SQLite file is ignored by Git. Admin credentials, environment values, and database URLs must stay in local environment settings or the hosting providers' secret configuration.
-
-## Run the regression tests
+From the repository root:
 
 ```powershell
-python -m pip install -r requirements-dev.txt
-python -m unittest discover -s tests -v
+python -m unittest discover -s backend/tests -v
 ```
+
+The backend regression suite covers registration, role isolation, sessions, database-free demo auth, order persistence and retry behavior, and recovery policy. Frontend checks are run from `dashboard/` with `npm run lint` and `npm run build`.
+
+## Deployment
+
+The existing Vercel project uses `dashboard/` as its root. Render uses the repository root with `pip install -r requirements.txt` and `uvicorn main:app --host 0.0.0.0 --port $PORT`. The root entry point and requirements include preserve those commands while application code lives under `backend/`. Set Vercel's `VITE_API_BASE_URL` to the Render API origin and configure `AUTOSRE_CORS_ORIGINS` on Render to include the frontend origin. Host status is not verified by this repository change.
+
+## Limitations
+
+Logical services, telemetry, and recovery actions are demonstrations rather than integrations with live infrastructure. Database-free state is ephemeral.
+
+## Future improvements
+
+Potential next steps include durable incident analytics, richer observability, and adapters for real infrastructure with explicit safety controls.
+
+See [docs/architecture.md](docs/architecture.md), [backend/README.md](backend/README.md), and [dashboard/README.md](dashboard/README.md) for implementation details.

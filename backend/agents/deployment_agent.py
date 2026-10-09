@@ -1,4 +1,4 @@
-from services.recovery_policy import SAFE_REPLICA_LIMIT
+from backend.services.recovery_policy import SAFE_REPLICA_LIMIT
 
 # agents/deployment_agent.py
 

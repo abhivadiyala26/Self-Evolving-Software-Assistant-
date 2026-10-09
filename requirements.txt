@@ -1,5 +1,2 @@
-fastapi
-uvicorn
-pydantic
-sqlalchemy>=2.0,<3.0
-psycopg[binary]>=3.2,<4.0
+# Keeps the existing Render build command working from the repository root.
+-r backend/requirements.txt

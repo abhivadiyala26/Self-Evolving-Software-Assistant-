@@ -2,7 +2,7 @@ import asyncio
 import random
 import time
 from datetime import datetime, timezone
-from services.recovery_policy import SAFE_REPLICA_LIMIT
+from backend.services.recovery_policy import SAFE_REPLICA_LIMIT
 
 SERVICES = [
     "frontend", "authservice", "cartservice", "checkoutservice", "recommendationservice",
