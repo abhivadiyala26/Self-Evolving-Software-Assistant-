@@ -2,6 +2,7 @@ import asyncio
 import random
 import time
 from datetime import datetime, timezone
+from services.recovery_policy import SAFE_REPLICA_LIMIT
 
 SERVICES = [
     "frontend", "authservice", "cartservice", "checkoutservice", "recommendationservice",
@@ -32,6 +33,7 @@ class BoutiqueSimulator:
         self.service_states = {svc: "healthy" for svc in SERVICES}
         self.replicas = {svc: 2 for svc in SERVICES}
         self.is_running = False
+        self.last_recovery_affected = []
 
     def trigger_chaos(self, scenario, target_service=None):
         self.chaos_scenario = scenario
@@ -68,6 +70,7 @@ class BoutiqueSimulator:
         self.scenario_started_at = None
         self.service_states = {svc: "healthy" for svc in SERVICES}
         self.replicas = {svc: 2 for svc in SERVICES}
+        self.last_recovery_affected = []
         self.generate_baseline_metrics()
 
     def begin_recovery(self, service):
@@ -78,21 +81,54 @@ class BoutiqueSimulator:
         return True
 
     def recover_service(self, service):
-        """Apply a bounded simulated recovery and stop the active injected fault."""
+        """Prepare a targeted recovery; verification must call complete_recovery."""
         if service not in self.service_states:
             return False
-        self.service_states[service] = "healthy"
-        # This simulator injects one scenario at a time. Removing that injection
-        # lets the following telemetry cycles verify the recovery against baseline.
-        self.chaos_scenario = None
-        self.target_service = None
-        self.scenario_started_at = None
-        self.service_states = {svc: "healthy" for svc in SERVICES}
-        self.generate_baseline_metrics()
+        if self.chaos_scenario and self.target_service != service:
+            return False
+
+        affected = {service}
+        if self.target_service == service:
+            affected.update({
+                "payment_crash": {"paymentservice", "checkoutservice", "frontend"},
+                "payment_high_latency": {"paymentservice", "checkoutservice", "frontend"},
+                "frontend_spike": {"frontend", "cartservice"},
+                "database_failure": {"database", "checkoutservice", "paymentservice"},
+            }.get(self.chaos_scenario, {service}))
+            self.chaos_scenario = None
+            self.target_service = None
+            self.scenario_started_at = None
+
+        self.last_recovery_affected = [name for name in affected if name in self.service_states]
+        for name in self.last_recovery_affected:
+            self.service_states[name] = "recovering"
+            self._generate_service_metrics(name)
         return True
 
+    def complete_recovery(self, services=None):
+        """Mark only verified recovery targets healthy."""
+        targets = services if services is not None else self.last_recovery_affected
+        for service in targets:
+            if service in self.service_states and self.service_states[service] == "recovering":
+                self.service_states[service] = "healthy"
+        return all(self.service_states.get(service) == "healthy" for service in targets)
+
+    def fail_recovery(self, services=None):
+        targets = services if services is not None else self.last_recovery_affected
+        for service in targets:
+            if service in self.service_states and self.service_states[service] == "recovering":
+                self.service_states[service] = "degraded"
+
+    def _generate_service_metrics(self, service):
+        base_rps = 100 if service in ["frontend", "loadgenerator"] else random.randint(20, 80)
+        self.metrics[service]["requests_per_sec"] = base_rps + random.randint(-10, 10)
+        self.metrics[service]["error_rate"] = round(random.uniform(0.0, 0.5), 2)
+        self.metrics[service]["latency_p95_ms"] = random.randint(10, 60)
+        self.metrics[service]["cpu_percent"] = round(random.uniform(18, 62), 1)
+        self.metrics[service]["memory_percent"] = round(random.uniform(35, 76), 1)
+
     def scale_service(self, service, replicas):
-        if service not in self.replicas or replicas < 1 or replicas > 4:
+        if service not in self.replicas or replicas < 1 or replicas > SAFE_REPLICA_LIMIT:
             return False
         self.replicas[service] = replicas
         return True
@@ -130,15 +166,7 @@ class BoutiqueSimulator:
 
     def generate_baseline_metrics(self):
         for svc in SERVICES:
-            base_rps = 100 if svc in ["frontend", "loadgenerator"] else random.randint(20, 80)
-            base_latency = random.randint(10, 50)
-            
-            # Baseline is mostly healthy
-            self.metrics[svc]["requests_per_sec"] = base_rps + random.randint(-10, 10)
-            self.metrics[svc]["error_rate"] = round(random.uniform(0.0, 0.5), 2)
-            self.metrics[svc]["latency_p95_ms"] = base_latency + random.randint(-5, 10)
-            self.metrics[svc]["cpu_percent"] = round(random.uniform(18, 62), 1)
-            self.metrics[svc]["memory_percent"] = round(random.uniform(35, 76), 1)
+            self._generate_service_metrics(svc)
 
     def apply_chaos_metrics(self):
         if not self.chaos_scenario:

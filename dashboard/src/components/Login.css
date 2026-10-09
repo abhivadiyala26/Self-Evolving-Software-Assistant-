@@ -18,7 +18,7 @@
 .login-submit:hover { background: #2d654f; }
 .login-footer { margin-top: 22px; text-align: center; color: #68726b; font-size: .88rem; }
 .login-footer p { margin: 0; }
-.toggle-mode { color: #34745b; font-weight: 650; cursor: pointer; }
+.toggle-mode { padding: 0; border: 0; background: transparent; color: #34745b; font: inherit; font-weight: 650; cursor: pointer; }
 .login-demo-note { margin-top: 24px; color: #788179; text-align: center; font-size: .75rem; }
 .login-demo-note p { margin-bottom: 8px; }
 .login-demo-inject { padding: 4px 7px; color: #667069; border: 1px solid #d8ded8; border-radius: 4px; background: transparent; font-size: .72rem; cursor: pointer; }

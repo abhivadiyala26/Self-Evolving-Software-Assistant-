@@ -10,9 +10,9 @@ def determine_remediation(rca_output):
 
     if "database" in issue:
         return {
-            "action": "restart_simulation",
+            "action": "restore_connection",
             "target": "database",
-            "message": "Restore the database connection and restart the database simulation."
+            "message": "Restore the database connection and verify dependent services."
         }
 
     if "cpu-saturated" in issue or "memory pressure" in issue:

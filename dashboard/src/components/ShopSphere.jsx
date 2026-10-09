@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   ShoppingBag, Search, User, Heart, Star, Truck, ShieldCheck,
   MapPin, X, ArrowRight, CheckCircle, CreditCard, Clock,
@@ -16,6 +16,23 @@ const readSaved = (key, fallback) => {
   try { return JSON.parse(localStorage.getItem(key) || JSON.stringify(fallback)); }
   catch { return fallback; }
 };
+const readUserSaved = (key, fallback, scope) => {
+  const scopedKey = `${key}:${scope}`;
+  try {
+    const scopedValue = localStorage.getItem(scopedKey);
+    if (scopedValue !== null) return JSON.parse(scopedValue);
+    if (scope === 'guest') {
+      const legacyValue = localStorage.getItem(key);
+      if (legacyValue !== null) {
+        localStorage.setItem(scopedKey, legacyValue);
+        return JSON.parse(legacyValue);
+      }
+    }
+    return fallback;
+  } catch {
+    return fallback;
+  }
+};
 const formatINR = (value) => new Intl.NumberFormat('en-IN', {
   style: 'currency', currency: 'INR', maximumFractionDigits: 0
 }).format(value || 0);
@@ -23,11 +40,14 @@ const formatINR = (value) => new Intl.NumberFormat('en-IN', {
 const ShopSphere = () => {
   const navigate = useNavigate();
   const location = useLocation();
+  const [currentUser, setCurrentUser] = useState(() => readSaved('currentUser', null));
+  const userScope = currentUser?.id || currentUser?.email || 'guest';
+  const orderIdempotencyKey = useRef(null);
   const [selectedCategory, setSelectedCategory] = useState('all');
   const [searchQuery, setSearchQuery] = useState('');
-  const [cart, setCart] = useState(() => readSaved('shopsphereCart', []));
-  const [wishlist, setWishlist] = useState(() => readSaved('shopsphereWishlist', []));
-  const [recentlyViewed, setRecentlyViewed] = useState(() => readSaved('shopsphereRecent', []));
+  const [cart, setCart] = useState(() => readUserSaved('shopsphereCart', [], userScope));
+  const [wishlist, setWishlist] = useState(() => readUserSaved('shopsphereWishlist', [], userScope));
+  const [recentlyViewed, setRecentlyViewed] = useState(() => readUserSaved('shopsphereRecent', [], userScope));
   const [detailQuantity, setDetailQuantity] = useState(1);
   const [selectedImageIndex, setSelectedImageIndex] = useState(0);
   const [deliveryPincode, setDeliveryPincode] = useState('400050');
@@ -74,14 +94,12 @@ const ShopSphere = () => {
     || systemMetrics?.paymentservice?.latency_p95_ms > 1000
     || systemMetrics?.checkoutservice?.error_rate > 20
   );
-  const [currentUser, setCurrentUser] = useState(() => readSaved('currentUser', null));
-
   useEffect(() => {
-    localStorage.setItem('shopsphereCart', JSON.stringify(cart));
-  }, [cart]);
+    localStorage.setItem(`shopsphereCart:${userScope}`, JSON.stringify(cart));
+  }, [cart, userScope]);
   useEffect(() => {
-    localStorage.setItem('shopsphereWishlist', JSON.stringify(wishlist));
-  }, [wishlist]);
+    localStorage.setItem(`shopsphereWishlist:${userScope}`, JSON.stringify(wishlist));
+  }, [wishlist, userScope]);
 
   const routeProduct = location.pathname.startsWith('/product/')
     ? MOCK_PRODUCTS.find((item) => item.id === location.pathname.split('/').pop()) || null
@@ -99,7 +117,9 @@ const ShopSphere = () => {
       try {
         const [metricsRes, ordersRes] = await Promise.all([
           fetch(`${API_URL}/metrics`),
-          frontendInteractionsDisabled || orderUnavailable ? Promise.resolve(null) : fetch(`${API_URL}/orders`)
+          !currentUser || frontendInteractionsDisabled || orderUnavailable ? Promise.resolve(null) : fetch(`${API_URL}/orders`, {
+            headers: { 'x-auth-token': localStorage.getItem('userToken') || localStorage.getItem('adminToken') || '' }
+          })
         ]);
         if (metricsRes.ok) {
           const mData = await metricsRes.json();
@@ -108,6 +128,12 @@ const ShopSphere = () => {
         if (ordersRes?.ok) {
           const oData = await ordersRes.json();
           setPlacedOrders(oData);
+        } else if (ordersRes?.status === 401) {
+          localStorage.removeItem('userToken');
+          localStorage.removeItem('adminToken');
+          localStorage.removeItem('currentUser');
+          setCurrentUser(null);
+          setPlacedOrders([]);
         }
       } catch {
         // Preserve the last successful view while the next poll retries.
@@ -117,7 +143,7 @@ const ShopSphere = () => {
     const interval = setInterval(pollBackend, 2000);
     pollBackend();
     return () => clearInterval(interval);
-  }, [frontendInteractionsDisabled, orderUnavailable]);
+  }, [currentUser, frontendInteractionsDisabled, orderUnavailable]);
 
   const availableBrands = [...new Set(MOCK_PRODUCTS.map((product) => product.brand))].sort();
   const suggestions = searchQuery.trim()
@@ -214,6 +240,11 @@ const ShopSphere = () => {
 
   // Checkout submission
   const handlePlaceOrder = async () => {
+    if (!currentUser) {
+      showToast('Sign in to place an order. Your guest cart will be kept on this device.');
+      navigate('/login', { state: { from: `${location.pathname}${location.search}` } });
+      return;
+    }
     if (!servicesReady) return showToast('Checking service availability. Please try again shortly.');
     if (frontendUnavailable) return showToast('Frontend service is temporarily unavailable.');
     if (cartUnavailable) return showToast('Cart service is temporarily unavailable. Please try again shortly.');
@@ -223,9 +254,25 @@ const ShopSphere = () => {
     if (cart.length === 0) return;
 
     try {
+      const token = localStorage.getItem('userToken') || localStorage.getItem('adminToken');
+      if (!token) {
+        showToast('Your sign-in session expired. Please sign in again.');
+        navigate('/login', { state: { authExpired: true } });
+        return;
+      }
+      if (!orderIdempotencyKey.current) {
+        const storageKey = `shopsphereOrderAttempt:${userScope}`;
+        const generated = globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random()}`;
+        orderIdempotencyKey.current = sessionStorage.getItem(storageKey) || generated;
+        sessionStorage.setItem(storageKey, orderIdempotencyKey.current);
+      }
       const res = await fetch(`${API_URL}/orders`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          'x-auth-token': token,
+          'Idempotency-Key': orderIdempotencyKey.current
+        },
         body: JSON.stringify({
           items: cart.map(i => ({ id: i.id, name: i.name, price: i.price, quantity: i.qty })),
           totalAmount: finalTotal,
@@ -237,11 +284,25 @@ const ShopSphere = () => {
 
       if (!res.ok) {
         const errData = await res.json();
+        if (res.status === 401) {
+          localStorage.removeItem('userToken');
+          localStorage.removeItem('adminToken');
+          localStorage.removeItem('currentUser');
+          setCurrentUser(null);
+          navigate('/login', { state: { authExpired: true } });
+          return;
+        }
+        if (res.status === 409) {
+          sessionStorage.removeItem(`shopsphereOrderAttempt:${userScope}`);
+          orderIdempotencyKey.current = null;
+        }
         showToast(`Checkout Error: ${errData.detail || 'Service degraded'}`);
         return;
       }
 
       const data = await res.json();
+      sessionStorage.removeItem(`shopsphereOrderAttempt:${userScope}`);
+      orderIdempotencyKey.current = null;
       setActiveOrder(data.order);
       setCart([]);
       setCheckoutStep('confirmation');
@@ -278,7 +339,7 @@ const ShopSphere = () => {
     }
     const next = [product, ...recentlyViewed.filter((item) => item.id !== product.id)].slice(0, 8);
     setRecentlyViewed(next);
-    localStorage.setItem('shopsphereRecent', JSON.stringify(next));
+    localStorage.setItem(`shopsphereRecent:${userScope}`, JSON.stringify(next));
     setDetailQuantity(1);
     setSelectedImageIndex(0);
     navigate(`/product/${product.id}`);
@@ -295,10 +356,15 @@ const ShopSphere = () => {
   };
   if (location.pathname === '/profile' && !currentUser) return <Navigate to="/login" replace />;
   const signOut = async () => {
-    const adminToken = localStorage.getItem('adminToken');
-    if (adminToken) await fetch(`${API_URL}/auth/logout`, { method: 'POST', headers: { 'x-admin-token': adminToken } }).catch(() => {});
+    const authToken = localStorage.getItem('userToken') || localStorage.getItem('adminToken');
+    if (authToken) await fetch(`${API_URL}/auth/logout`, { method: 'POST', headers: { 'x-auth-token': authToken } }).catch(() => {});
+    localStorage.removeItem('userToken');
     localStorage.removeItem('adminToken');
     localStorage.removeItem('currentUser');
+    setCart([]);
+    setWishlist([]);
+    setRecentlyViewed([]);
+    setPlacedOrders([]);
     setCurrentUser(null);
     showToast('You have been signed out.');
     navigate('/');
@@ -653,6 +719,7 @@ const ShopSphere = () => {
               {activeCheckoutStep === 'payment' && (
                 <div className="checkout-step-content">
                   <h4>Select Payment Method</h4>
+                  <p className="orders-unavailable-note">This demonstration records orders only. UPI, card, and net banking payments are not charged or processed.</p>
                   {checkoutUnavailable && <div className="checkout-outage-note"><AlertCircle size={16} /> {orderUnavailable ? 'Order service is temporarily unavailable.' : paymentUnavailable ? 'Payment service is temporarily unavailable. Please try again later.' : 'Payment is temporarily unavailable while AutoSRE investigates a service issue.'}</div>}
                   {['upi', 'card', 'netbanking', 'cod'].map(m => (
                     <div
@@ -665,8 +732,9 @@ const ShopSphere = () => {
                     </div>
                   ))}
                   <button className="btn-banner-shop" onClick={handlePlaceOrder} disabled={checkoutUnavailable || cartUnavailable}>
-                    Pay & Place Order ({formatINR(finalTotal)})
+                    Place Order ({formatINR(finalTotal)})
                   </button>
+                  {!currentUser && <p className="orders-unavailable-note">Sign in to place an order and view your order history.</p>}
                 </div>
               )}
 
@@ -703,6 +771,11 @@ const ShopSphere = () => {
                 <div className="orders-unavailable-note" role="status">
                   {frontendUnavailable ? 'Frontend service is temporarily unavailable.' : 'Order service is temporarily unavailable.'}
                 </div>
+              ) : !currentUser ? (
+                <div className="orders-unavailable-note" role="status">
+                  <p>Sign in to view your personal order history.</p>
+                  <button className="btn-banner-shop" onClick={() => navigate('/login', { state: { from: '/orders' } })}>Sign In</button>
+                </div>
               ) : placedOrders.length === 0 ? (
                 <div style={{ color: '#8B949E', textAlign: 'center', padding: '2rem' }}>No past orders found.</div>
               ) : (
@@ -714,7 +787,7 @@ const ShopSphere = () => {
                     </div>
                     <div className="order-history-meta">Placed on: {ord.timestamp}</div>
                     <div className="order-history-items">{(ord.items || []).map((item) => `${item.name} × ${item.quantity}`).join(' · ')}</div>
-                    <div className="order-history-meta">Payment: {ord.paymentStatus} · {ord.paymentMethod}</div>
+                    <div className="order-history-meta">Payment: {ord.paymentStatus === 'cash_on_delivery' ? 'Cash on delivery' : 'Not processed (demo)'} · {ord.paymentMethod}</div>
                     <div className="order-history-status">{ord.status} · {ord.deliveryEstimate}</div>
                     <div className="order-tracking-line">{['PLACED', 'CONFIRMED', 'PACKED', 'SHIPPED', 'OUT FOR DELIVERY', 'DELIVERED'].map((stage, index) => <React.Fragment key={stage}><span className={['PLACED', 'CONFIRMED', 'PACKED', 'SHIPPED', 'OUT FOR DELIVERY', 'DELIVERED'].indexOf(ord.status) >= index ? 'tracking-stage active' : 'tracking-stage'}>{stage}</span>{index < 5 && <b>›</b>}</React.Fragment>)}</div>
                   </div>
@@ -765,7 +838,7 @@ const ShopSphere = () => {
           <div className="modal-content animate-fade-in" onClick={(event) => event.stopPropagation()}>
             <div className="modal-header"><h3>Notifications</h3><button className="modal-close-btn" onClick={() => setIsNotificationsOpen(false)}><X size={18} /></button></div>
             <div className="modal-body notification-list">
-              {placedOrders.slice(0, 3).map((order) => <p key={order.order_id}><CheckCircle size={16} /> {({ PLACED: 'Order placed', CONFIRMED: 'Order confirmed', PACKED: 'Order packed', SHIPPED: 'Order shipped', 'OUT FOR DELIVERY': 'Order is out for delivery', DELIVERED: 'Order delivered', CANCELLED: 'Order cancelled' })[order.status] || 'Order update'} · {order.order_id}{order.paymentStatus === 'paid' ? ' · Payment successful' : ' · Cash on delivery'}</p>)}
+              {placedOrders.slice(0, 3).map((order) => <p key={order.order_id}><CheckCircle size={16} /> {({ PLACED: 'Order placed', CONFIRMED: 'Order confirmed', PACKED: 'Order packed', SHIPPED: 'Order shipped', 'OUT FOR DELIVERY': 'Order is out for delivery', DELIVERED: 'Order delivered', CANCELLED: 'Order cancelled' })[order.status] || 'Order update'} · {order.order_id} · {order.paymentStatus === 'cash_on_delivery' ? 'Cash on delivery' : 'Payment not processed in demo'}</p>)}
               <p><Tag size={16} /> 10% instant discount on HDFC cards is available today.</p>
               <p><Sparkles size={16} /> Your weekly ShopSphere deals are ready.</p>
               <p><Bell size={16} /> Price drop alerts and back-in-stock updates are enabled for your wishlist.</p>

@@ -6,12 +6,72 @@ import { ServiceAvailabilityNotice } from './serviceAvailability';
 import { isServiceUnavailable, useServiceStatuses } from './serviceStatus';
 import './Login.css';
 
+const saveAuthenticatedUser = (data) => {
+  const userId = data.user.id;
+  if (data.user.role === 'user' && userId) {
+    for (const key of ['shopsphereCart', 'shopsphereWishlist', 'shopsphereRecent']) {
+      const accountKey = `${key}:${userId}`;
+      const guestData = localStorage.getItem(`${key}:guest`) || localStorage.getItem(key);
+      if (!localStorage.getItem(accountKey) && guestData) localStorage.setItem(accountKey, guestData);
+    }
+  }
+  localStorage.setItem(data.user.role === 'admin' ? 'adminToken' : 'userToken', data.token);
+  localStorage.setItem('currentUser', JSON.stringify(data.user));
+};
+
+const clearLegacyUser = (email) => {
+  try {
+    const legacyUsers = JSON.parse(localStorage.getItem('users') || '[]');
+    if (!Array.isArray(legacyUsers)) return;
+    const remainingUsers = legacyUsers.filter((user) => user.email?.trim().toLowerCase() !== email.trim().toLowerCase());
+    if (remainingUsers.length) localStorage.setItem('users', JSON.stringify(remainingUsers));
+    else localStorage.removeItem('users');
+  } catch {
+    // A malformed legacy value should not prevent the user from signing in.
+    return;
+  }
+};
+
+const migrateLegacyUser = async ({ email, password }) => {
+  let legacyUser;
+  try {
+    const legacyUsers = JSON.parse(localStorage.getItem('users') || '[]');
+    legacyUser = Array.isArray(legacyUsers) && legacyUsers.find((user) =>
+      user.role === 'user'
+      && user.email?.trim().toLowerCase() === email.trim().toLowerCase()
+      && user.password === password
+    );
+  } catch {
+    return null;
+  }
+  if (!legacyUser) return null;
+
+  let response = await fetch(`${API_URL}/auth/register`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name: legacyUser.name || 'ShopSphere User', email: legacyUser.email, password })
+  });
+  let data = await response.json();
+  if (response.status === 409) {
+    // The account may already have been migrated from another browser/device.
+    response = await fetch(`${API_URL}/auth/login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email, password, role: 'user' })
+    });
+    data = await response.json();
+  }
+  if (!response.ok) return null;
+  clearLegacyUser(email);
+  return data;
+};
+
 const Login = () => {
   const location = useLocation();
   const navigate = useNavigate();
   const [isLogin, setIsLogin] = useState(true);
   const [role, setRole] = useState(location.state?.authExpired ? 'admin' : 'user'); // 'user' or 'admin'
-  const [formData, setFormData] = useState({ name: '', email: '', password: '' });
+  const [formData, setFormData] = useState({ name: '', email: '', password: '', confirmPassword: '' });
   const [error, setError] = useState(location.state?.authExpired ? 'Your admin session expired. Sign in again to continue.' : '');
   const { statuses: serviceStatuses, ready: servicesReady } = useServiceStatuses();
   const frontendUnavailable = servicesReady && isServiceUnavailable(serviceStatuses, 'frontend');
@@ -37,56 +97,69 @@ const Login = () => {
           const res = await fetch(`${API_URL}/auth/login`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ email: formData.email, password: formData.password })
+            body: JSON.stringify({ email: formData.email, password: formData.password, role })
           });
           const data = await res.json();
           if (!res.ok) {
-            const message = res.status === 401
-              ? 'Invalid admin credentials. Use the demo password “password”.'
-              : data.detail || 'Admin sign-in failed.';
+            const message = data.detail || 'Sign-in failed.';
             throw new Error(message);
           }
-          localStorage.setItem('adminToken', data.token);
-          localStorage.setItem('currentUser', JSON.stringify({ email: formData.email, name: data.name, role: 'admin' }));
-          navigate('/dashboard');
+          localStorage.removeItem('userToken');
+          saveAuthenticatedUser(data);
+          navigate(data.user.role === 'admin' ? '/dashboard' : '/');
         } catch (err) {
           setError(err.message || 'Could not reach the AutoSRE backend.');
         }
         return;
       }
       localStorage.removeItem('adminToken');
-      // Mock Login
-      const users = JSON.parse(localStorage.getItem('users') || '[]');
-      const user = users.find(u => u.email === formData.email && u.password === formData.password && u.role === role);
-      
-      if (user) {
-        localStorage.setItem('currentUser', JSON.stringify(user));
-        // Store users return to ShopSphere after sign-in.
-        navigate('/');
-      } else {
-        setError('Invalid credentials or incorrect role selected.');
+      try {
+        const res = await fetch(`${API_URL}/auth/login`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email: formData.email, password: formData.password, role: 'user' })
+        });
+        let data = await res.json();
+        if (!res.ok && res.status === 401) {
+          const migratedAccount = await migrateLegacyUser(formData);
+          if (migratedAccount) data = migratedAccount;
+        }
+        if (!res.ok && !data?.token) throw new Error(data.detail || 'Invalid email or password.');
+        localStorage.removeItem('adminToken');
+        clearLegacyUser(formData.email);
+        saveAuthenticatedUser(data);
+        navigate(location.state?.from || '/');
+      } catch (err) {
+        setError(err.message || 'Could not reach the AutoSRE backend.');
       }
     } else {
       if (role === 'admin') {
-        setError('Admin accounts are provisioned for the demo. Sign in with the provided admin account.');
+        setError('Admin accounts are provisioned by the backend environment and cannot sign up here.');
         return;
       }
-      // Mock Signup
-      const users = JSON.parse(localStorage.getItem('users') || '[]');
-      if (users.find(u => u.email === formData.email)) {
-        setError('Account already exists with this email.');
+      if (formData.password.length < 8) {
+        setError('Password must be at least 8 characters.');
         return;
       }
-      
-      const newUser = { ...formData, role };
-      users.push(newUser);
-      localStorage.setItem('users', JSON.stringify(users));
-      
-      // Auto login after signup
-      localStorage.setItem('currentUser', JSON.stringify(newUser));
-      
-      // New customer accounts start in ShopSphere.
-      navigate('/');
+      if (formData.password !== formData.confirmPassword) {
+        setError('Passwords do not match.');
+        return;
+      }
+      try {
+        const res = await fetch(`${API_URL}/auth/register`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name: formData.name, email: formData.email, password: formData.password })
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || 'Could not create the account.');
+        localStorage.removeItem('adminToken');
+        clearLegacyUser(formData.email);
+        saveAuthenticatedUser(data);
+        navigate(location.state?.from || '/');
+      } catch (err) {
+        setError(err.message || 'Could not reach the AutoSRE backend.');
+      }
     }
   };
 
@@ -120,19 +193,6 @@ const Login = () => {
           </button>
         </div>
 
-        {isLogin && role === 'admin' && (
-          <button
-            type="button"
-            className="demo-credential-button"
-            onClick={() => {
-              setFormData((current) => ({ ...current, email: 'admin@technogear.com', password: 'password' }));
-              setError('');
-            }}
-          >
-            Fill demo admin email and password
-          </button>
-        )}
-
         <form className="login-form" onSubmit={handleSubmit}>
           {!isLogin && (
             <div className="form-group">
@@ -157,7 +217,7 @@ const Login = () => {
               onChange={(e) => setFormData({...formData, email: e.target.value})}
             />
           </div>
-          
+
           <div className="form-group">
             <label>Password</label>
             <input 
@@ -169,6 +229,20 @@ const Login = () => {
             />
           </div>
 
+          {!isLogin && (
+            <div className="form-group">
+              <label>Confirm Password</label>
+              <input
+                type="password"
+                placeholder="Re-enter your password"
+                required
+                autoComplete="new-password"
+                value={formData.confirmPassword}
+                onChange={(e) => setFormData({...formData, confirmPassword: e.target.value})}
+              />
+            </div>
+          )}
+
           <button type="submit" className="login-submit">
             {isLogin ? 'Sign In' : 'Sign Up'}
           </button>
@@ -177,27 +251,13 @@ const Login = () => {
         <div className="login-footer">
           <p>
             {isLogin ? "Don't have an account? " : "Already have an account? "}
-            <span className="toggle-mode" onClick={() => setIsLogin(!isLogin)}>
+            <button type="button" className="toggle-mode" onClick={() => { setIsLogin(!isLogin); setError(''); }}>
               {isLogin ? 'Sign Up' : 'Sign In'}
-            </span>
+            </button>
           </p>
         </div>
         
-        <div className="login-demo-note">
-          <p>Demo accounts:<br/>admin@technogear.com / password (Admin) | demo@shopsphere.in / password (User)</p>
-          <button 
-            type="button" 
-            className="login-demo-inject"
-            onClick={() => {
-               localStorage.setItem('users', JSON.stringify([
-                 {email: 'demo@shopsphere.in', password: 'password', role: 'user', name: 'Demo User'}
-               ]));
-               alert("Demo user account is ready. Admin sign-in is verified by the backend.");
-            }}
-          >
-             Inject Demo Data
-          </button>
-        </div>
+        {isLogin && role === 'admin' && <div className="login-demo-note">Admin access is provisioned by the backend environment configuration.</div>}
         </div>
       </div>
     </div>

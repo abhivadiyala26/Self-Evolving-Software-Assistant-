@@ -1,13 +1,16 @@
 # main.py
 from fastapi import FastAPI, BackgroundTasks, Depends, Header, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 import asyncio
+import hashlib
+import json
 import os
 import time
 import uuid
 from datetime import datetime, timezone, timedelta
-import secrets
+from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
 # Import agents
 from agents.monitoring_agent import detect_anomaly
@@ -17,6 +20,28 @@ from agents.remediation_agent import determine_remediation
 from agents.deployment_agent import execute_deployment
 from services.boutique_simulator import simulator
 from services.incident_service import incident_manager, evaluate_severity, analyze_impact
+from services.auth import (
+    authenticate_session,
+    create_session,
+    hash_password,
+    normalize_email,
+    public_account,
+    provision_configured_admin,
+    revoke_session,
+    valid_email,
+    verify_password,
+)
+from services.database import DATABASE_CONFIGURED, Order, SessionLocal, User, get_db_session, initialize_database
+from services.recovery_policy import (
+    AUTOMATIC_RECOVERY_ATTEMPTS,
+    CRITICAL_ERROR_RATE_PERCENT,
+    CRITICAL_LATENCY_MS,
+    CRITICAL_WINDOW_SECONDS,
+    SAFE_REPLICA_LIMIT,
+    WARNING_LATENCY_MS,
+    critical_metrics_sustained,
+    classify_recovery_risk as policy_classify_recovery_risk,
+)
 
 app = FastAPI(title="AutoSRE Agent Backend")
 
@@ -59,20 +84,74 @@ AUTO_DEMO_FAILURES_ENABLED = os.getenv("AUTOSRE_DEMO_FAILURES_ENABLED", "false")
 automatic_demo_incidents = {}
 automatic_demo_crashes = {}
 
+runtime_tasks = []
+database_ready = False
+
 @app.on_event("startup")
 async def startup_event():
-    asyncio.create_task(simulator.run(add_log))
-    asyncio.create_task(background_monitor_loop())
-    if AUTO_DEMO_FAILURES_ENABLED:
-        asyncio.create_task(automatic_demo_failure_loop())
+    global database_ready
+    if DATABASE_CONFIGURED:
+        try:
+            initialize_database()
+            database_ready = True
+        except SQLAlchemyError as error:
+            database_ready = False
+            background_agent["last_action"] = f"Persistent storage initialization failed: {type(error).__name__}"
+            add_log("System", "Storage Error", f"Persistent storage initialization failed ({type(error).__name__}); auth and orders are unavailable until storage recovers.")
+        if database_ready:
+            try:
+                with SessionLocal() as db:
+                    configured_admin = provision_configured_admin(db)
+                if not configured_admin:
+                    background_agent["last_action"] = "Database ready; configure AUTOSRE_ADMIN_EMAIL and AUTOSRE_ADMIN_PASSWORD to enable the admin account."
+                # Continue in-progress demo order status updates after a process restart.
+                with SessionLocal() as db:
+                    pending_order_ids = list(db.scalars(select(Order.order_id).where(
+                        Order.payment_status == "cash_on_delivery",
+                        Order.status.not_in(["DELIVERED", "CANCELLED"]),
+                    )))
+                for order_id in pending_order_ids:
+                    task = asyncio.create_task(progress_order(order_id), name=f"autosre-order-{order_id}")
+                    order_progress_tasks.add(task)
+                    task.add_done_callback(order_progress_tasks.discard)
+                    runtime_tasks.append(task)
+            except ValueError as error:
+                background_agent["last_action"] = str(error)
+                add_log("System", "Configuration Error", str(error))
+            except SQLAlchemyError as error:
+                database_ready = False
+                background_agent["last_action"] = f"Account database initialization failed: {type(error).__name__}"
+                add_log("System", "Storage Error", "Account database initialization failed; auth and orders are unavailable until storage recovers.")
     else:
-        background_agent["last_action"] = "Automatic failure demo is disabled; use the admin console to inject a scenario."
+        background_agent["last_action"] = "Durable database is not configured; configure DATABASE_URL to enable account and order persistence."
+
+    if not any(task.get_name() in {"autosre-simulator", "autosre-monitor"} for task in runtime_tasks):
+        runtime_tasks.extend([
+            asyncio.create_task(supervised_simulator_loop(), name="autosre-simulator"),
+            asyncio.create_task(background_monitor_loop(), name="autosre-monitor"),
+        ])
+        if AUTO_DEMO_FAILURES_ENABLED:
+            runtime_tasks.append(asyncio.create_task(supervised_demo_failure_loop(), name="autosre-demo-failures"))
+        else:
+            background_agent["last_action"] = "Automatic failure demo is disabled; use the admin console to inject a scenario."
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    simulator.is_running = False
+    for task in runtime_tasks:
+        task.cancel()
+    if runtime_tasks:
+        await asyncio.gather(*runtime_tasks, return_exceptions=True)
+    runtime_tasks.clear()
 
 # Allow CORS for React dashboard
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
+    allow_origins=[origin.strip().rstrip("/") for origin in os.getenv(
+        "AUTOSRE_CORS_ORIGINS",
+        "https://self-evolving-assistant-zeta.vercel.app,http://localhost:5173,http://127.0.0.1:5173"
+    ).split(",") if origin.strip()],
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -88,8 +167,14 @@ class ChaosScenario(BaseModel):
     service: str | None = None
 
 class AdminLogin(BaseModel):
-    email: str
-    password: str
+    email: str = Field(max_length=254)
+    password: str = Field(max_length=128)
+    role: str | None = None
+
+class UserRegistration(BaseModel):
+    name: str = Field(max_length=80)
+    email: str = Field(max_length=254)
+    password: str = Field(min_length=8, max_length=128)
 
 class OrderRequest(BaseModel):
     items: list[dict]
@@ -101,8 +186,6 @@ class OrderRequest(BaseModel):
 # In-memory store for demo logs to be polled by frontend
 demo_logs = []
 alerts = []
-orders = []
-admin_sessions = set()
 order_progress_tasks = set()
 current_system_state = "healthy"
 runtime_generation = 0
@@ -120,13 +203,49 @@ background_agent = {
     "demo_failure_current_service": None,
 }
 monitor_violation_streaks = {}
+monitor_clear_streaks = {}
+monitor_metric_started = {}
 processed_incidents = set()
 processing_incidents = set()
+recovery_in_progress = set()
 
-def require_admin(x_admin_token: str = Header(default="")):
-    if not x_admin_token or x_admin_token not in admin_sessions:
+def _bearer_token(authorization: str) -> str:
+    if authorization.lower().startswith("bearer "):
+        return authorization[7:].strip()
+    return ""
+
+def require_admin(
+    x_admin_token: str = Header(default=""),
+    authorization: str = Header(default=""),
+    db=Depends(get_db_session),
+):
+    if not database_ready:
+        raise HTTPException(status_code=503, detail="Authentication storage is unavailable. Configure or restore the backend database.")
+    token = x_admin_token or _bearer_token(authorization)
+    try:
+        authenticated = authenticate_session(db, token)
+    except SQLAlchemyError:
+        raise HTTPException(status_code=503, detail="Authentication storage is unavailable.")
+    if not authenticated or authenticated[0].role != "admin":
         raise HTTPException(status_code=403, detail="Admin authentication required.")
-    return True
+    return public_account(authenticated[0])
+
+def require_current_user(
+    x_auth_token: str = Header(default=""),
+    x_admin_token: str = Header(default=""),
+    authorization: str = Header(default=""),
+    db=Depends(get_db_session),
+):
+    if not database_ready:
+        raise HTTPException(status_code=503, detail="Authentication storage is unavailable. Configure or restore the backend database.")
+    token = x_auth_token or x_admin_token or _bearer_token(authorization)
+    try:
+        authenticated = authenticate_session(db, token)
+    except SQLAlchemyError:
+        raise HTTPException(status_code=503, detail="Authentication storage is unavailable.")
+    if not authenticated:
+        raise HTTPException(status_code=401, detail="Sign in to access this account.")
+    return authenticated[0]
 
 def add_log(agent: str, log_type: str, message: str):
     now = datetime.now(timezone.utc)
@@ -164,8 +283,13 @@ def add_log(agent: str, log_type: str, message: str):
         del demo_logs[:-1000]
 
 def add_alert(service: str, severity: str, title: str, description: str, incident_id: str = None):
-    alerts.insert(0, {
-        "alert_id": f"ALT-{len(alerts) + 1:04d}",
+    existing = next((item for item in alerts if item.get("incident_id") == incident_id
+                     and item.get("service") == service and item.get("title") == title
+                     and item.get("status") == "firing"), None)
+    if existing:
+        return existing
+    alert = {
+        "alert_id": f"ALT-{uuid.uuid4().hex[:8].upper()}",
         "service": service,
         "severity": severity,
         "title": title,
@@ -173,8 +297,10 @@ def add_alert(service: str, severity: str, title: str, description: str, inciden
         "incident_id": incident_id,
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "status": "firing"
-    })
+    }
+    alerts.insert(0, alert)
     del alerts[200:]
+    return alert
 
 
 async def background_monitor_loop():
@@ -190,19 +316,65 @@ async def background_monitor_loop():
             for service in services:
                 name = service["id"]
                 values = metrics.get(name, {})
-                violating = (
-                    service["status"] != "healthy"
-                    or values.get("error_rate", 0) >= 5
-                    or values.get("latency_p95_ms", 0) >= 300
-                    or values.get("cpu_percent", 0) >= 90
-                    or values.get("memory_percent", 0) >= 92
-                    or values.get("requests_per_sec", 0) >= 1000
-                )
+                now_monotonic = time.monotonic()
+                critical_signals = {
+                    "latency": values.get("latency_p95_ms", 0) >= CRITICAL_LATENCY_MS,
+                    "errors": values.get("error_rate", 0) >= CRITICAL_ERROR_RATE_PERCENT,
+                    "cpu": values.get("cpu_percent", 0) >= 95,
+                    "memory": values.get("memory_percent", 0) >= 97,
+                    "traffic": values.get("requests_per_sec", 0) >= 1500,
+                }
+                sustained_critical = False
+                for signal, active_signal in critical_signals.items():
+                    key = (name, signal)
+                    if active_signal:
+                        started = monitor_metric_started.setdefault(key, now_monotonic)
+                        sustained_critical = sustained_critical or now_monotonic - started >= CRITICAL_WINDOW_SECONDS
+                    else:
+                        monitor_metric_started.pop(key, None)
+                status_breach = service["status"] != "healthy"
+                violating = status_breach or sustained_critical
                 monitor_violation_streaks[name] = monitor_violation_streaks.get(name, 0) + 1 if violating else 0
+                fully_recovered = (
+                    service["status"] == "healthy"
+                    and values.get("latency_p95_ms", float("inf")) < WARNING_LATENCY_MS
+                    and values.get("error_rate", float("inf")) < CRITICAL_ERROR_RATE_PERCENT
+                    and values.get("cpu_percent", 100) < 95
+                    and values.get("memory_percent", 100) < 97
+                    and values.get("requests_per_sec", 0) < 1500
+                )
+                monitor_clear_streaks[name] = monitor_clear_streaks.get(name, 0) + 1 if fully_recovered else 0
 
             active = incident_manager.get_active_incident()
+            if active and active.get("status") == "monitoring":
+                incident_id = active["incident_id"]
+                target = (active.get("affected_services", {}).get("directly_affected") or [None])[0]
+                if target and monitor_clear_streaks.get(target, 0) >= 3:
+                    incident_manager.resolve_incident(incident_id, "The temporary anomaly cleared during monitoring; no recovery action was applied.")
+                    incident_manager.add_timeline_event(incident_id, "Monitoring", "Transient anomaly cleared", "The affected service and critical metrics returned to healthy values for three consecutive samples. No recovery action was needed.", "Monitoring Agent")
+                    processed_incidents.discard(incident_id)
+                    current_system_state = "healthy" if all(status == "healthy" for status in simulator.service_states.values()) else "anomaly"
+                    add_log("Monitoring Agent", "Resolution", f"Transient anomaly for {target} cleared during observation; no recovery action was applied.")
+                    active = None
+                elif target and any(
+                    monitor_metric_started.get((target, signal)) is not None
+                    and time.monotonic() - monitor_metric_started[(target, signal)] >= CRITICAL_WINDOW_SECONDS
+                    for signal in ("latency", "errors")
+                ):
+                    incident_manager.update_incident(incident_id, {"status": "investigating"})
+                    processed_incidents.discard(incident_id)
+                    add_log("Monitoring Agent", "Detection", f"Critical telemetry on {target} persisted through the observation window; resuming recovery analysis for {incident_id}.")
+                    active = incident_manager.get_active_incident()
             if not active:
-                candidate = next((svc for svc in services if monitor_violation_streaks.get(svc["id"], 0) >= 3), None)
+                candidate = next((
+                    svc for svc in services
+                    if (svc["status"] != "healthy" and monitor_violation_streaks.get(svc["id"], 0) >= 3)
+                    or any(
+                        monitor_metric_started.get((svc["id"], signal)) is not None
+                        and time.monotonic() - monitor_metric_started[(svc["id"], signal)] >= CRITICAL_WINDOW_SECONDS
+                        for signal in ("latency", "errors", "cpu", "memory", "traffic")
+                    )
+                ), None)
                 if candidate:
                     name = candidate["id"]
                     current_system_state = "anomaly"
@@ -228,9 +400,32 @@ async def background_monitor_loop():
                         processing_incidents.add(incident_id)
                         asyncio.create_task(orchestrate_agents(active.get("scenario", "telemetry_anomaly"), incident_id, runtime_generation, target))
         except Exception as error:
-            background_agent["last_action"] = f"Monitor cycle error: {error}"
-            add_log("Monitoring Agent", "Error", f"Background telemetry cycle failed: {error}")
+            background_agent["last_action"] = f"Monitor cycle error: {type(error).__name__}"
+            add_log("Monitoring Agent", "Error", f"Background telemetry cycle failed ({type(error).__name__}).")
         await asyncio.sleep(1)
+
+async def supervised_simulator_loop():
+    while True:
+        try:
+            simulator.is_running = True
+            await simulator.run(add_log)
+            if not simulator.is_running:
+                return
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            background_agent["last_action"] = f"Simulator worker error: {type(error).__name__}"
+            add_log("System", "Worker Error", f"Simulator worker failed ({type(error).__name__}); retrying shortly.")
+            await asyncio.sleep(1)
+
+async def supervised_demo_failure_loop():
+    try:
+        await automatic_demo_failure_loop()
+    except asyncio.CancelledError:
+        raise
+    except Exception as error:
+        background_agent["last_action"] = f"Demo worker error: {type(error).__name__}"
+        add_log("Background Agent", "Worker Error", f"Automatic demo worker failed ({type(error).__name__}).")
 
 async def automatic_demo_failure_loop():
     """Inject one demo crash at a time and let the regular monitor/recovery pipeline handle it."""
@@ -280,20 +475,85 @@ async def automatic_demo_failure_loop():
         if background_agent["demo_failures_completed"] < len(sequence):
             await asyncio.sleep(DEMO_FAILURE_RECOVERY_PAUSE_SECONDS)
 
+@app.post("/api/auth/register")
+async def register_user(credentials: UserRegistration, db=Depends(get_db_session)):
+    if not database_ready:
+        raise HTTPException(status_code=503, detail="Account storage is unavailable. Configure or restore the backend database.")
+    name = credentials.name.strip()
+    email = normalize_email(credentials.email)
+    password = credentials.password
+    if not name or len(name) > 80:
+        raise HTTPException(status_code=422, detail="Name must be between 1 and 80 characters.")
+    if not valid_email(email):
+        raise HTTPException(status_code=422, detail="Enter a valid email address.")
+    if len(password) < 8 or len(password) > 128:
+        raise HTTPException(status_code=422, detail="Password must be between 8 and 128 characters.")
+    try:
+        if db.scalar(select(User).where(User.email == email)):
+            raise HTTPException(status_code=409, detail="An account already exists with this email.")
+    except SQLAlchemyError:
+        raise HTTPException(status_code=503, detail="Account storage is unavailable.")
+    user = User(name=name, email=email, password_hash=hash_password(password), role="user")
+    db.add(user)
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="An account already exists with this email.")
+    except SQLAlchemyError:
+        db.rollback()
+        raise HTTPException(status_code=503, detail="Account storage is unavailable.")
+    try:
+        db.refresh(user)
+        token = create_session(db, user)
+    except SQLAlchemyError:
+        db.rollback()
+        raise HTTPException(status_code=503, detail="Account storage is unavailable.")
+    return {"token": token, "user": public_account(user)}
+
 @app.post("/api/auth/login")
-async def admin_login(credentials: AdminLogin):
+async def login(credentials: AdminLogin, db=Depends(get_db_session)):
     # Admin access is part of the control plane and must remain available while
     # a simulated storefront or auth service outage is being investigated.
-    if credentials.email.lower() != "admin@technogear.com" or credentials.password != "password":
-        raise HTTPException(status_code=401, detail="Invalid admin credentials.")
-    token = secrets.token_urlsafe(32)
-    admin_sessions.add(token)
-    return {"token": token, "role": "admin", "name": "Admin"}
+    if not database_ready:
+        raise HTTPException(status_code=503, detail="Account storage is unavailable. Configure or restore the backend database.")
+    if credentials.role not in {None, "user", "admin"}:
+        raise HTTPException(status_code=422, detail="Select a valid account role.")
+    email = normalize_email(credentials.email)
+    try:
+        user = db.scalar(select(User).where(User.email == email))
+        if not user or not verify_password(credentials.password, user.password_hash):
+            raise HTTPException(status_code=401, detail="Invalid email or password.")
+    except SQLAlchemyError:
+        raise HTTPException(status_code=503, detail="Account storage is unavailable.")
+    if credentials.role in {"user", "admin"} and credentials.role != user.role:
+        raise HTTPException(status_code=401, detail="Invalid email or password.")
+    try:
+        token = create_session(db, user)
+    except SQLAlchemyError:
+        db.rollback()
+        raise HTTPException(status_code=503, detail="Account storage is unavailable.")
+    return {"token": token, "user": public_account(user), "role": user.role, "name": user.name}
 
 @app.post("/api/auth/logout")
-async def admin_logout(admin: bool = Depends(require_admin), x_admin_token: str = Header(default="")):
-    admin_sessions.discard(x_admin_token)
+async def logout(
+    current_user: User = Depends(require_current_user),
+    x_auth_token: str = Header(default=""),
+    x_admin_token: str = Header(default=""),
+    authorization: str = Header(default=""),
+    db=Depends(get_db_session),
+):
+    del current_user
+    try:
+        revoke_session(db, x_auth_token or x_admin_token or _bearer_token(authorization))
+    except SQLAlchemyError:
+        db.rollback()
+        raise HTTPException(status_code=503, detail="Account storage is unavailable.")
     return {"status": "logged_out"}
+
+@app.get("/api/auth/me")
+async def get_current_account(current_user: User = Depends(require_current_user)):
+    return public_account(current_user)
 
 @app.get("/api/status")
 async def get_status():
@@ -415,13 +675,15 @@ async def reset_demo(admin: bool = Depends(require_admin)):
     runtime_generation += 1
     demo_logs.clear()
     alerts.clear()
-    orders.clear()
     current_system_state = "healthy"
     simulator.reset()
     incident_manager.reset()
     monitor_violation_streaks.clear()
+    monitor_clear_streaks.clear()
+    monitor_metric_started.clear()
     processed_incidents.clear()
     processing_incidents.clear()
+    recovery_in_progress.clear()
     automatic_demo_crashes.clear()
     automatic_demo_incidents.clear()
     background_agent.update({
@@ -486,22 +748,29 @@ async def trigger_chaos(scenario: ChaosScenario, background_tasks: BackgroundTas
         "message": "Background monitor is collecting sustained telemetry before agent analysis."
     }
 
-def classify_recovery_risk(scenario: str, service: str, metrics: dict, impact: dict) -> str:
-    values = metrics.get(service, {})
-    error_rate = values.get("error_rate", 0)
-    latency = values.get("latency_p95_ms", 0)
-    status = simulator.service_states.get(service, "healthy")
-    affected = set(impact.get("directly_affected", [])) | set(impact.get("downstream_affected", []))
-    active_affected = sum(
-        1 for name in affected
-        if simulator.service_states.get(name) != "healthy"
-        or metrics.get(name, {}).get("error_rate", 0) >= 20
+def classify_recovery_risk(
+    scenario: str,
+    service: str,
+    metrics: dict,
+    impact: dict,
+    plan: dict | None = None,
+    previous_attempts: int = 0,
+    critical_sustained: bool = False,
+) -> str:
+    """Risk is based on the proposed operation, not the incident's severity."""
+    del scenario, metrics, impact
+    plan = plan or {}
+    targets = set(plan.get("targets") or [])
+    if plan.get("target"):
+        targets.add(plan["target"])
+    return policy_classify_recovery_risk(
+        action=plan.get("action", "alert_only"),
+        target=service if not plan.get("target") else plan.get("target"),
+        plan=plan,
+        impacted_services=targets or {service},
+        previous_attempts=previous_attempts,
+        critical_sustained=critical_sustained,
     )
-    if scenario in {"database_failure", "payment_crash"} or latency >= 2500 or (service == "paymentservice" and error_rate >= 50) or active_affected >= 4:
-        return "critical"
-    if (status == "down" and service in {"authservice", "paymentservice", "checkoutservice", "database"}) or latency >= 1500 or error_rate >= 25 or (service == "database" and values.get("memory_percent", 0) >= 95) or active_affected >= 3:
-        return "high"
-    return "medium"
 
 
 async def orchestrate_agents(scenario: str = "payment_crash", incident_id: str = None, generation: int = None, primary_service: str = None):
@@ -520,6 +789,9 @@ async def orchestrate_agents(scenario: str = "payment_crash", incident_id: str =
         }.get(scenario, "frontend")
         all_metrics = simulator.get_metrics()
         current_metrics = all_metrics.get(svc, {"latency_p95_ms": 0, "error_rate": 0})
+        latency_duration = time.monotonic() - monitor_metric_started[(svc, "latency")] if (svc, "latency") in monitor_metric_started else 0.0
+        error_duration = time.monotonic() - monitor_metric_started[(svc, "errors")] if (svc, "errors") in monitor_metric_started else 0.0
+        critical_sustained = critical_metrics_sustained(current_metrics, latency_duration, error_duration)
 
         # Dynamic Severity & Impact Analysis
         impact = analyze_impact(svc)
@@ -538,7 +810,7 @@ async def orchestrate_agents(scenario: str = "payment_crash", incident_id: str =
         add_log("Monitoring Agent", "Alert", monitoring_result["message"])
         current_system_state = "rca"
         add_alert(svc, dynamic_severity, "Anomaly detected", monitoring_result["message"], incident_id)
-        add_log("Detection Agent", "Detection", f"Threshold policy matched for {svc}; severity evaluated as {dynamic_severity}.")
+        add_log("Detection Agent", "Detection", f"Threshold policy matched for {svc}; severity evaluated as {dynamic_severity}. Latency warning starts at {WARNING_LATENCY_MS:g}ms; critical latency is {CRITICAL_LATENCY_MS:g}ms sustained for {CRITICAL_WINDOW_SECONDS:g}s. Recovery approval is based on action risk, not incident severity.")
 
         if incident_id:
             now_str = datetime.now().strftime("%I:%M:%S %p")
@@ -608,7 +880,63 @@ async def orchestrate_agents(scenario: str = "payment_crash", incident_id: str =
         remediation_plan = determine_remediation(rca_result)
         add_log("Recommendation Agent", "Action", remediation_plan["message"])
 
-        risk_level = classify_recovery_risk(scenario, svc, all_metrics, impact)
+        if scenario == "payment_high_latency" and remediation_plan.get("action") == "scale_deployment" and not critical_sustained:
+            # A brief warning is an investigation signal, not a scale command.
+            # Observe through the configured critical window before deciding.
+            observation_deadline = time.monotonic() + CRITICAL_WINDOW_SECONDS + 1
+            healthy_samples = 0
+            latest_metrics = all_metrics
+            while time.monotonic() < observation_deadline:
+                await asyncio.sleep(1)
+                if generation is not None and generation != runtime_generation:
+                    return
+                latest_metrics = simulator.get_metrics()
+                current_metrics = latest_metrics.get(svc, {"latency_p95_ms": 0, "error_rate": 0})
+                latency_duration = time.monotonic() - monitor_metric_started[(svc, "latency")] if (svc, "latency") in monitor_metric_started else 0.0
+                error_duration = time.monotonic() - monitor_metric_started[(svc, "errors")] if (svc, "errors") in monitor_metric_started else 0.0
+                critical_sustained = critical_metrics_sustained(current_metrics, latency_duration, error_duration)
+                if critical_sustained or simulator.service_states.get(svc) == "down":
+                    break
+                transiently_healthy = (
+                    simulator.service_states.get(svc) == "healthy"
+                    and current_metrics.get("latency_p95_ms", float("inf")) < WARNING_LATENCY_MS
+                    and current_metrics.get("error_rate", float("inf")) < CRITICAL_ERROR_RATE_PERCENT
+                )
+                healthy_samples = healthy_samples + 1 if transiently_healthy else 0
+                if healthy_samples >= 3:
+                    if incident_id:
+                        incident_manager.add_timeline_event(incident_id, "Monitoring", "Transient spike cleared", "Latency returned below the warning threshold for three consecutive samples; no scaling or approval request was needed.", "Monitoring Agent")
+                        incident_manager.resolve_incident(incident_id, "The temporary latency spike cleared during observation; no recovery action was applied.")
+                    current_system_state = "healthy"
+                    background_agent["last_action"] = f"Transient latency on {svc} cleared; continued monitoring without scaling."
+                    add_log("Monitoring Agent", "Resolution", f"Transient latency on {svc} cleared during observation; no scaling or approval was needed.")
+                    return
+            if not critical_sustained and simulator.service_states.get(svc) != "down":
+                if incident_id:
+                    incident_manager.update_incident(incident_id, {
+                        "status": "monitoring",
+                        "risk_level": "medium",
+                        "approval_status": "not_required",
+                        "recovery_action": None,
+                        "recovery_status": "monitoring",
+                        "recommended_remediation": "Continue monitoring; the critical latency/error threshold was not sustained, so no scaling action was taken.",
+                    })
+                    incident_manager.add_timeline_event(incident_id, "Monitoring", "Critical window not met", "Latency did not remain above the configured critical threshold for the observation window. No approval was requested and no scaling action was applied.", "Monitoring Agent")
+                current_system_state = "anomaly"
+                background_agent["last_action"] = f"Monitoring {svc}; the critical window was not met, so no scaling action was taken."
+                add_log("Monitoring Agent", "Observation", f"Critical window not met for {svc}; continued monitoring without scaling or an approval request.")
+                return
+            all_metrics = latest_metrics
+            current_metrics = all_metrics.get(svc, current_metrics)
+
+        latency_duration = time.monotonic() - monitor_metric_started[(svc, "latency")] if (svc, "latency") in monitor_metric_started else 0.0
+        error_duration = time.monotonic() - monitor_metric_started[(svc, "errors")] if (svc, "errors") in monitor_metric_started else 0.0
+        critical_sustained = critical_sustained or critical_metrics_sustained(current_metrics, latency_duration, error_duration)
+        dynamic_severity = evaluate_severity(all_metrics, svc, impact)
+        risk_level = classify_recovery_risk(
+            scenario, svc, all_metrics, impact, remediation_plan,
+            critical_sustained=critical_sustained,
+        )
         demo_crash_started = automatic_demo_incidents.get(incident_id)
         if demo_crash_started is not None:
             remaining_down_time = DEMO_FAILURE_MIN_DOWN_SECONDS - (time.monotonic() - demo_crash_started)
@@ -621,6 +949,8 @@ async def orchestrate_agents(scenario: str = "payment_crash", incident_id: str =
             incident_manager.update_incident(incident_id, {
                 "status": "awaiting_approval" if risk_level in {"high", "critical"} else "recovering",
                 "approval_status": "pending" if risk_level in {"high", "critical"} else "not_required",
+                "severity": dynamic_severity,
+                "symptoms": f"Observed {svc} telemetry after the decision window. Latency: {current_metrics.get('latency_p95_ms', 0)}ms, Error Rate: {current_metrics.get('error_rate', 0)}%",
                 "risk_level": risk_level,
                 "recommended_remediation": remediation_plan.get("message", "Apply the recommended recovery action"),
                 "recovery_action": remediation_plan
@@ -629,7 +959,7 @@ async def orchestrate_agents(scenario: str = "payment_crash", incident_id: str =
                 incident_id,
                 stage="Remediation Strategy",
                 title=f"{risk_level.title()}-risk remediation selected",
-                description=f"{remediation_plan.get('message', 'Selected remediation strategy')} Risk policy: {risk_level}; {'administrator approval required' if risk_level in {'high', 'critical'} else 'bounded automatic recovery allowed'}.",
+                description=f"{remediation_plan.get('message', 'Selected remediation strategy')} Risk policy: {risk_level}; {'administrator approval required' if risk_level in {'high', 'critical'} else 'bounded automatic recovery allowed'}. {'Critical telemetry remained above the configured threshold for the observation window.' if critical_sustained else 'No sustained critical latency or error window was observed at decision time.'}",
                 agent="Remediation Agent"
             )
 
@@ -656,12 +986,43 @@ async def orchestrate_agents(scenario: str = "payment_crash", incident_id: str =
 
 async def execute_approved_recovery(incident_id: str, generation: int, automatic: bool = False):
     global current_system_state
+    if incident_id in recovery_in_progress:
+        return
+    recovery_in_progress.add(incident_id)
+    try:
+        await _execute_recovery_once(incident_id, generation, automatic)
+    except asyncio.CancelledError:
+        raise
+    except Exception as error:
+        incident = incident_manager.get_incident_by_id(incident_id)
+        add_log("Recovery Agent", "Error", f"Recovery runner failed ({type(error).__name__}); no success was recorded.")
+        if incident and automatic:
+            incident_manager.update_incident(incident_id, {
+                "status": "awaiting_approval",
+                "approval_status": "pending",
+                "risk_level": "high",
+                "recovery_status": "escalated",
+                "recommended_remediation": "Automatic recovery encountered an internal error. Review the incident and choose the next action.",
+            })
+            incident_manager.add_timeline_event(incident_id, "Escalation", "Recovery runner stopped", f"The automatic recovery worker stopped after {type(error).__name__}; no healthy state was assumed.", "Incident Manager Agent")
+            background_agent["escalations"] += 1
+            current_system_state = "awaiting_approval"
+            add_alert((incident.get("affected_services", {}).get("directly_affected") or ["AutoSRE"])[0], incident.get("severity", "P2"), "Recovery worker error", "Automatic recovery stopped unexpectedly; administrator review is required.", incident_id)
+        elif incident:
+            incident_manager.fail_incident(incident_id, "The approved recovery worker stopped unexpectedly.")
+            current_system_state = "degraded"
+    finally:
+        recovery_in_progress.discard(incident_id)
+
+
+async def _execute_recovery_once(incident_id: str, generation: int, automatic: bool = False):
+    global current_system_state
     incident = incident_manager.get_incident_by_id(incident_id)
     if not incident or generation != runtime_generation:
         return
     plan = incident.get("recovery_action") or {"action": "restart_simulation", "target": "all"}
     target = plan.get("target") or (incident.get("affected_services", {}).get("directly_affected") or ["frontend"])[0]
-    max_attempts = 3 if automatic else 1
+    max_attempts = AUTOMATIC_RECOVERY_ATTEMPTS if automatic else 1
     attempts_before_action = int(incident.get("recovery_attempts", 0))
     for attempt in range(1, max_attempts + 1):
         if generation != runtime_generation:
@@ -674,14 +1035,15 @@ async def execute_approved_recovery(incident_id: str, generation: int, automatic
         result = execute_deployment(plan)
         if result.get("status") == "success":
             action = plan.get("action")
-            if action == "scale_deployment" and not simulator.scale_service(target, min(4, max(1, int(plan.get("replicas", 3))))):
-                result = {"status": "failed", "message": "Scaling policy rejected the requested replica count; automatic limit is four."}
-            elif action in {"restart_service", "restart_simulation", "restart_pod", "restore_connection", "reduce_load", "retry_request", "remove_bad_replica", "scale_deployment"}:
+            if action == "scale_deployment" and not simulator.scale_service(target, int(plan.get("replicas", 3))):
+                result = {"status": "failed", "message": f"Scaling policy rejected the requested replica count; safe limit is {SAFE_REPLICA_LIMIT}."}
+            elif action in {"restart_service", "restart_pod", "restore_connection", "reduce_load", "retry_request", "remove_bad_replica", "scale_deployment"}:
                 simulator.begin_recovery(target)
                 await asyncio.sleep(1.5)
                 if generation != runtime_generation:
                     return
-                simulator.recover_service(target)
+                if not simulator.recover_service(target):
+                    result = {"status": "failed", "message": f"Recovery target {target} did not match the active simulated failure."}
             else:
                 result = {"status": "failed", "message": result.get("message", "No safe recovery action was available.")}
 
@@ -690,16 +1052,29 @@ async def execute_approved_recovery(incident_id: str, generation: int, automatic
             incident_manager.add_timeline_event(incident_id, "Recovery Execution", f"{label.title()} recovery executed", result.get("message", "Recovery action applied."), "Recovery Agent")
             add_log("Recovery Agent", "Action", result.get("message", "Recovery action applied."))
             current_system_state = "recovering"
-            await asyncio.sleep(2.2)
-            if generation != runtime_generation:
-                return
+            affected = set(simulator.last_recovery_affected or [target])
+            incident_impact = incident.get("affected_services", {})
+            required_services = sorted(affected | set(incident_impact.get("directly_affected", [])))
+            healthy_samples = 0
+            for _ in range(3):
+                await asyncio.sleep(1)
+                if generation != runtime_generation:
+                    return
+                metrics = simulator.get_metrics()
+                metrics_ok = all(
+                    metrics.get(name, {}).get("error_rate", 100) < CRITICAL_ERROR_RATE_PERCENT
+                    and metrics.get(name, {}).get("latency_p95_ms", float("inf")) < CRITICAL_LATENCY_MS
+                    and metrics.get(name, {}).get("cpu_percent", 100) < 95
+                    and metrics.get(name, {}).get("memory_percent", 100) < 97
+                    for name in required_services
+                )
+                if metrics_ok:
+                    healthy_samples += 1
+                else:
+                    healthy_samples = 0
 
-            health = simulator.get_services()
-            metrics = simulator.get_metrics()
-            healthy = all(service["status"] == "healthy" for service in health)
-            metrics_ok = all(values["error_rate"] < 5 and values["latency_p95_ms"] < 800 for values in metrics.values())
-            if healthy and metrics_ok:
-                incident_manager.add_timeline_event(incident_id, "Verification", "Post-recovery health check passed", "Service health, latency, and error rates remained within recovery thresholds for two monitor cycles.", "Verification Agent")
+            if healthy_samples == 3 and simulator.complete_recovery(required_services):
+                incident_manager.add_timeline_event(incident_id, "Verification", "Post-recovery health check passed", f"Targeted service health and critical telemetry stayed within configured recovery thresholds for three consecutive samples. Critical latency is {CRITICAL_LATENCY_MS:g}ms; critical error rate is {CRITICAL_ERROR_RATE_PERCENT:g}%.", "Verification Agent")
                 add_log("Verification Agent", "Health Check", "Recovery verified: services are healthy and telemetry is within baseline limits.")
                 incident_manager.update_incident(incident_id, {"auto_recovered": automatic, "approval_status": "not_required" if automatic else "approved"})
                 incident_manager.resolve_incident(incident_id, f"{label.title()} recovery completed and post-recovery checks passed.")
@@ -709,9 +1084,10 @@ async def execute_approved_recovery(incident_id: str, generation: int, automatic
                 if automatic:
                     background_agent["auto_recoveries"] += 1
                 background_agent["last_action"] = f"Recovered {target}; verification passed"
-                current_system_state = "healthy"
+                current_system_state = "healthy" if all(status == "healthy" for status in simulator.service_states.values()) else "anomaly"
                 return
-            result = {"status": "failed", "message": "Post-recovery health checks did not pass."}
+            simulator.fail_recovery(required_services)
+            result = {"status": "failed", "message": "Targeted post-recovery health checks did not pass for three consecutive samples."}
 
         incident_manager.add_timeline_event(incident_id, "Verification", f"Recovery attempt {attempt_number} failed", result.get("message", "Recovery action failed."), "Verification Agent")
         add_log("Verification Agent", "Error", f"Recovery attempt {attempt_number} failed: {result.get('message', 'Unknown recovery error')}")
@@ -724,13 +1100,13 @@ async def execute_approved_recovery(incident_id: str, generation: int, automatic
             "approval_status": "pending",
             "risk_level": "high",
             "recovery_status": "escalated",
-            "recommended_remediation": f"Three bounded automatic recovery attempts failed. Review and approve: {plan.get('message', plan.get('action'))}",
+            "recommended_remediation": f"{max_attempts} bounded automatic recovery attempts failed. Review and approve: {plan.get('message', plan.get('action'))}",
         })
-        incident_manager.add_timeline_event(incident_id, "Escalation", "Automatic recovery limit reached", "Three automatic recovery attempts failed; an administrator must review the next action.", "Incident Manager Agent")
+        incident_manager.add_timeline_event(incident_id, "Escalation", "Automatic recovery limit reached", f"{max_attempts} bounded automatic recovery attempts failed; an administrator must review the next action.", "Incident Manager Agent")
         background_agent["escalations"] += 1
-        background_agent["last_action"] = f"Escalated {incident_id} after three failed automatic attempts"
+        background_agent["last_action"] = f"Escalated {incident_id} after {max_attempts} failed automatic attempts"
         current_system_state = "awaiting_approval"
-        add_log("Incident Manager Agent", "Approval", f"Incident {incident_id} escalated after three failed automatic recovery attempts; administrator approval is required.")
+        add_log("Incident Manager Agent", "Approval", f"Incident {incident_id} escalated after {max_attempts} failed automatic recovery attempts; administrator approval is required.")
         add_alert(target, incident.get("severity", "P2"), "Automatic recovery escalated", incident["recommended_remediation"], incident_id)
     else:
         incident_manager.fail_incident(incident_id, result.get("message", "Recovery failed."))
@@ -789,39 +1165,97 @@ async def start_service(service: str, admin: bool = Depends(require_admin)):
         raise HTTPException(status_code=404, detail="Unknown service.")
     if simulator.service_states[service] == "healthy":
         return {"status": "already_healthy", "service": service}
-    simulator.reset()
-    current_system_state = "healthy"
+    if not simulator.recover_service(service):
+        raise HTTPException(status_code=409, detail="The active simulated failure targets a different service. Resolve that incident first.")
+    affected = simulator.last_recovery_affected[:]
+    healthy_samples = 0
+    for _ in range(3):
+        await asyncio.sleep(1)
+        metrics = simulator.get_metrics()
+        metrics_ok = all(
+            metrics.get(name, {}).get("error_rate", 100) < CRITICAL_ERROR_RATE_PERCENT
+            and metrics.get(name, {}).get("latency_p95_ms", float("inf")) < CRITICAL_LATENCY_MS
+            and metrics.get(name, {}).get("cpu_percent", 100) < 95
+            and metrics.get(name, {}).get("memory_percent", 100) < 97
+            for name in affected
+        )
+        healthy_samples = healthy_samples + 1 if metrics_ok else 0
+    if healthy_samples < 3 or not simulator.complete_recovery(affected):
+        simulator.fail_recovery(affected)
+        raise HTTPException(status_code=503, detail="The service restart was applied, but its health verification failed.")
     incident = incident_manager.get_active_incident()
     if incident:
         incident_manager.update_incident(incident["incident_id"], {"approval_status": "manual_recovery", "auto_recovered": False, "executed_action": f"Administrator restarted {service}."})
         incident_manager.add_timeline_event(incident["incident_id"], "Admin Recovery", "Service restarted", f"Administrator restarted {service}.", "Admin")
-        incident_manager.add_timeline_event(incident["incident_id"], "Verification", "Health check passed", "The simulator reports all services healthy.", "Verification Agent")
+        incident_manager.add_timeline_event(incident["incident_id"], "Verification", "Health check passed", f"Targeted service metrics passed three consecutive samples for {', '.join(affected)}.", "Verification Agent")
         incident_manager.resolve_incident(incident["incident_id"], "Administrator restarted the service and health checks passed.")
     add_log("Admin", "Recovery", f"Administrator started {service}.")
+    current_system_state = "healthy" if all(status == "healthy" for status in simulator.service_states.values()) else "anomaly"
     return {"status": "healthy", "service": service}
 
+def order_to_dict(order: Order) -> dict:
+    order_time = order.timestamp
+    if order_time.tzinfo is None:
+        order_time = order_time.replace(tzinfo=timezone.utc)
+    return {
+        "order_id": order.order_id,
+        "user_id": order.user_id,
+        "items": order.items,
+        "totalAmount": order.total_amount,
+        "paymentMethod": order.payment_method,
+        "paymentStatus": order.payment_status,
+        "status": order.status,
+        "address": order.address,
+        "timestamp": order_time.isoformat(),
+        "deliveryOption": order.delivery_option,
+        "deliveryEstimate": order.delivery_estimate,
+    }
+
 @app.get("/api/orders")
-async def get_orders():
+async def get_orders(current_user: User = Depends(require_current_user), db=Depends(get_db_session)):
     if simulator.service_states.get("frontend") != "healthy":
         raise HTTPException(status_code=503, detail="Frontend service is temporarily unavailable.")
     if simulator.service_states.get("checkoutservice") != "healthy":
         raise HTTPException(status_code=503, detail="Order service is temporarily unavailable.")
-    return orders
+    return [order_to_dict(order) for order in db.scalars(
+        select(Order).where(Order.user_id == current_user.id).order_by(Order.timestamp.desc()).limit(100)
+    )]
 
 async def progress_order(order_id: str):
     stages = ["CONFIRMED", "PACKED", "SHIPPED", "OUT FOR DELIVERY", "DELIVERED"]
+    if not database_ready or SessionLocal is None:
+        return
+    with SessionLocal() as db:
+        saved_order = db.get(Order, order_id)
+        if not saved_order or saved_order.payment_status != "cash_on_delivery":
+            return
+        if saved_order.status in stages:
+            stages = stages[stages.index(saved_order.status) + 1:]
     for stage in stages:
         await asyncio.sleep(3)
         if simulator.service_states.get("checkoutservice") != "healthy":
             return
-        order = next((item for item in orders if item["order_id"] == order_id), None)
-        if not order:
+        if not database_ready or SessionLocal is None:
             return
-        order["status"] = stage
-        add_log("Order Service", "Order Update", f"Order {order_id} status changed to {stage}.")
+        try:
+            with SessionLocal() as db:
+                order = db.get(Order, order_id)
+                if not order or order.status in {"DELIVERED", "CANCELLED"}:
+                    return
+                order.status = stage
+                db.commit()
+            add_log("Order Service", "Order Update", f"Order {order_id} status changed to {stage}.")
+        except SQLAlchemyError as error:
+            add_log("Order Service", "Error", f"Order status update could not be saved ({type(error).__name__}).")
+            return
 
 @app.post("/api/orders")
-async def place_order(order: OrderRequest):
+async def place_order(
+    order: OrderRequest,
+    idempotency_key: str = Header(default="", alias="Idempotency-Key"),
+    current_user: User = Depends(require_current_user),
+    db=Depends(get_db_session),
+):
     unavailable_services = (
         ("frontend", "Frontend service"),
         ("cartservice", "Cart service"),
@@ -833,25 +1267,93 @@ async def place_order(order: OrderRequest):
             raise HTTPException(status_code=503, detail=f"{label} is temporarily unavailable.")
     if not order.items:
         raise HTTPException(status_code=422, detail="Your cart is empty.")
-    now = datetime.now(timezone.utc)
-    record = {
-        "order_id": f"AS-{now.strftime('%y%m%d')}-{len(orders) + 1:04d}",
-        "items": order.items,
+    if not 8 <= len(idempotency_key) <= 128:
+        raise HTTPException(status_code=422, detail="A valid Idempotency-Key header is required to prevent duplicate orders.")
+    if len(order.items) > 50:
+        raise HTTPException(status_code=422, detail="An order can contain at most 50 line items.")
+    if order.deliveryOption not in {"standard", "express"}:
+        raise HTTPException(status_code=422, detail="Select a valid delivery option.")
+    payment_method = order.paymentMethod.strip().upper()
+    if payment_method not in {"UPI", "CARD", "NETBANKING", "COD"}:
+        raise HTTPException(status_code=422, detail="Select a valid payment method.")
+    normalized_items = []
+    subtotal = 0.0
+    for item in order.items:
+        try:
+            item_id = str(item["id"])
+            item_name = str(item["name"]).strip()
+            price = float(item["price"])
+            quantity = int(item["quantity"])
+        except (KeyError, TypeError, ValueError):
+            raise HTTPException(status_code=422, detail="Each order item needs an id, name, price, and quantity.")
+        if not item_id or not item_name or len(item_name) > 160 or not (0 < price <= 10_000_000) or not (1 <= quantity <= 100):
+            raise HTTPException(status_code=422, detail="One or more order items contain invalid values.")
+        normalized_items.append({"id": item_id[:80], "name": item_name, "price": round(price, 2), "quantity": quantity})
+        subtotal += price * quantity
+    if not order.address.strip() or len(order.address) > 500:
+        raise HTTPException(status_code=422, detail="Enter a valid delivery address.")
+    expected_total = subtotal + (99 if order.deliveryOption == "express" else 0 if subtotal > 999 else 49)
+    if abs(expected_total - order.totalAmount) > 0.02:
+        raise HTTPException(status_code=422, detail="The order total does not match its items and delivery option.")
+    if not (0 < order.totalAmount <= 100_000_000):
+        raise HTTPException(status_code=422, detail="Enter a valid order total.")
+
+    request_body = {
+        "items": normalized_items,
         "totalAmount": round(order.totalAmount, 2),
-        "paymentMethod": order.paymentMethod,
-        "paymentStatus": "pending" if order.paymentMethod.upper() == "COD" else "paid",
-        "status": "PLACED",
-        "address": order.address,
-        "timestamp": now.isoformat(),
+        "paymentMethod": payment_method,
+        "address": order.address.strip(),
         "deliveryOption": order.deliveryOption,
-        "deliveryEstimate": "Today by 9 PM" if order.deliveryOption == "express" else "Delivery by Tomorrow"
     }
-    orders.insert(0, record)
-    add_log("Order Service", "Order", f"Order {record['order_id']} placed for ₹{record['totalAmount']:,.2f}.")
-    task = asyncio.create_task(progress_order(record["order_id"]))
-    order_progress_tasks.add(task)
-    task.add_done_callback(order_progress_tasks.discard)
-    return {"order": record}
+    request_hash = hashlib.sha256(json.dumps(request_body, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+    previous_order = db.scalar(select(Order).where(
+        Order.user_id == current_user.id,
+        Order.idempotency_key == idempotency_key,
+    ))
+    if previous_order:
+        if previous_order.request_hash != request_hash:
+            raise HTTPException(status_code=409, detail="This order retry key was already used with different checkout details.")
+        return {"order": order_to_dict(previous_order), "replayed": True}
+
+    now = datetime.now(timezone.utc)
+    record = Order(
+        order_id=f"AS-{now.strftime('%y%m%d')}-{uuid.uuid4().hex[:8].upper()}",
+        user_id=current_user.id,
+        idempotency_key=idempotency_key,
+        request_hash=request_hash,
+        items=normalized_items,
+        total_amount=round(order.totalAmount, 2),
+        payment_method=payment_method,
+        # There is no payment gateway in this demo: never claim a real payment succeeded.
+        payment_status="cash_on_delivery" if payment_method == "COD" else "payment_pending_demo",
+        status="PLACED",
+        address=order.address.strip(),
+        delivery_option=order.deliveryOption,
+        delivery_estimate="Today by 9 PM" if order.deliveryOption == "express" else "Delivery by Tomorrow",
+    )
+    db.add(record)
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        previous_order = db.scalar(select(Order).where(
+            Order.user_id == current_user.id,
+            Order.idempotency_key == idempotency_key,
+        ))
+        if previous_order and previous_order.request_hash == request_hash:
+            return {"order": order_to_dict(previous_order), "replayed": True}
+        raise HTTPException(status_code=409, detail="The order could not be saved because this retry key conflicts with another request.")
+    except SQLAlchemyError:
+        db.rollback()
+        raise HTTPException(status_code=503, detail="Order storage is unavailable. Please retry with the same checkout session.")
+    record = db.get(Order, record.order_id)
+    result = order_to_dict(record)
+    add_log("Order Service", "Order", f"Order {record.order_id} was recorded with payment status {record.payment_status}.")
+    if record.payment_status == "cash_on_delivery":
+        task = asyncio.create_task(progress_order(record.order_id))
+        order_progress_tasks.add(task)
+        task.add_done_callback(order_progress_tasks.discard)
+    return {"order": result, "replayed": False}
 
 if __name__ == "__main__":
     import uvicorn

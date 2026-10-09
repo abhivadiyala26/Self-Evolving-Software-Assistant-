@@ -1,3 +1,5 @@
+from services.recovery_policy import SAFE_REPLICA_LIMIT
+
 # agents/deployment_agent.py
 
 def execute_deployment(remediation_plan):
@@ -12,16 +14,16 @@ def execute_deployment(remediation_plan):
             return {"status": "failed", "message": "A target service is required for recovery."}
         return {
             "status": "success",
-            "message": f"Applied bounded {action.replace('_', ' ')} action to {target}."
+            "message": f"Applied bounded simulated {action.replace('_', ' ')} action to {target}."
         }
         
     if action == "scale_deployment":
         replicas = int(remediation_plan.get("replicas", 3))
-        if not target or replicas < 1 or replicas > 4:
-            return {"status": "failed", "message": "Scaling is limited to one through four replicas and requires a target."}
+        if not target or replicas < 1 or replicas > SAFE_REPLICA_LIMIT:
+            return {"status": "failed", "message": f"Scaling is limited to one through {SAFE_REPLICA_LIMIT} replicas and requires a target."}
         return {
             "status": "success",
-            "message": f"Scaled {target} within the automatic limit to {replicas} replicas."
+            "message": f"Simulated scaling {target} within the configured limit to {replicas} replicas."
         }
     
     return {"status": "skipped", "message": "No k8s action required."}
