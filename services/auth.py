@@ -54,6 +54,12 @@ _demo_auth_status = {
     "demo_user_configured": False,
     "admin_error": None,
     "demo_user_error": None,
+    "public_demo_enabled": False,
+}
+_public_demo_enabled = False
+PUBLIC_DEMO_ACCOUNTS = {
+    "user": {"email": "demo.user@autosre-demo.example", "password": "AutoSRE-Demo-User-2026!"},
+    "admin": {"email": "demo.admin@autosre-demo.example", "password": "AutoSRE-Demo-Admin-2026!"},
 }
 
 
@@ -133,9 +139,9 @@ def public_account(user: User) -> dict:
     return {"id": user.id, "name": user.name, "email": user.email, "role": user.role}
 
 
-def configure_demo_accounts() -> dict:
-    """Load env-configured demo identities; never provide source-code defaults."""
-    global _fixed_demo_emails
+def configure_demo_accounts(*, allow_public_demo: bool = False) -> dict:
+    """Load private demo identities and optionally add public demo-only accounts."""
+    global _fixed_demo_emails, _public_demo_enabled
     configured_by_role = {}
     status = {}
     definitions = (
@@ -174,6 +180,29 @@ def configure_demo_accounts() -> dict:
         status["admin_error"] = "Admin and demo user must use different email addresses."
         status["demo_user_error"] = "Admin and demo user must use different email addresses."
     configured = {account.email: account for account in configured_by_role.values()}
+    public_accounts_available = bool(allow_public_demo)
+    if public_accounts_available:
+        for role, credentials in PUBLIC_DEMO_ACCOUNTS.items():
+            email = credentials["email"]
+            if email in configured:
+                public_accounts_available = False
+                break
+            configured[email] = DemoAccount(
+                id=str(uuid4()),
+                name="AutoSRE Demo Admin" if role == "admin" else "ShopSphere Demo User",
+                email=email,
+                role=role,
+                password_hash=hash_password(credentials["password"]),
+            )
+        if not public_accounts_available:
+            for credentials in PUBLIC_DEMO_ACCOUNTS.values():
+                configured.pop(credentials["email"], None)
+        else:
+            status["admin_configured"] = True
+            status["demo_user_configured"] = True
+            status["admin_error"] = None
+            status["demo_user_error"] = None
+    status["public_demo_enabled"] = public_accounts_available
 
     with _demo_lock:
         old_fixed_ids = {account.id for email, account in _demo_accounts.items() if email in _fixed_demo_emails}
@@ -187,6 +216,7 @@ def configure_demo_accounts() -> dict:
         _demo_sessions.clear()
         _demo_sessions.update(_demo_sessions_copy)
         _fixed_demo_emails = set(configured)
+        _public_demo_enabled = public_accounts_available
         _demo_auth_status.update(status)
         return dict(_demo_auth_status)
 
@@ -194,6 +224,14 @@ def configure_demo_accounts() -> dict:
 def demo_auth_status() -> dict:
     with _demo_lock:
         return dict(_demo_auth_status)
+
+
+def public_demo_credentials() -> dict | None:
+    """Return only intentionally public demo credentials, never configured secrets."""
+    with _demo_lock:
+        if not _public_demo_enabled:
+            return None
+        return {role: dict(credentials) for role, credentials in PUBLIC_DEMO_ACCOUNTS.items()}
 
 
 def demo_account_exists(email: str) -> bool:

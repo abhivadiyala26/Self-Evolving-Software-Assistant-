@@ -32,6 +32,7 @@ from services.auth import (
     hash_password,
     normalize_email,
     public_account,
+    public_demo_credentials,
     provision_configured_admin,
     register_temporary_demo_user,
     revoke_demo_session,
@@ -98,7 +99,10 @@ database_ready = False
 @app.on_event("startup")
 async def startup_event():
     global database_ready
-    auth_status = configure_demo_accounts()
+    render_runtime = os.getenv("RENDER", "").strip().lower() in {"1", "true", "yes", "on"}
+    auth_status = configure_demo_accounts(
+        allow_public_demo=render_runtime and not DATABASE_CONFIGURED,
+    )
     if DATABASE_CONFIGURED:
         try:
             initialize_database()
@@ -619,6 +623,7 @@ async def get_demo_auth_info():
         "database_configured": persistent,
         "admin_configured": config["admin_configured"],
         "demo_user_configured": config["demo_user_configured"],
+        "public_demo_accounts": public_demo_credentials(),
         "signup_mode": "persistent" if persistent else "temporary",
         "admin_message": config["admin_error"] or (None if config["admin_configured"] else (
             "Admin demo login is not configured. Set AUTOSRE_ADMIN_EMAIL and AUTOSRE_ADMIN_PASSWORD in the backend environment."

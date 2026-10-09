@@ -224,6 +224,36 @@ class AutoSRERegressionTests(unittest.TestCase):
 
         configure_demo_accounts()
 
+    def test_public_demo_suggestions_match_working_database_free_accounts(self):
+        from services.auth import PUBLIC_DEMO_ACCOUNTS, configure_demo_accounts
+
+        with patch.object(database, "SessionLocal", None), patch.object(main, "database_ready", False), patch.object(main, "DATABASE_CONFIGURED", False):
+            configure_demo_accounts(allow_public_demo=True)
+            info = self.client.get("/api/auth/demo-info").json()
+            suggestions = info["public_demo_accounts"]
+            self.assertEqual(suggestions, PUBLIC_DEMO_ACCOUNTS)
+            self.assertNotIn("test-admin-password-123", str(suggestions))
+
+            user_login = self.client.post("/api/auth/login", json={
+                **suggestions["user"], "role": "user",
+            })
+            admin_login = self.client.post("/api/auth/login", json={
+                **suggestions["admin"], "role": "admin",
+            })
+            invalid_login = self.client.post("/api/auth/login", json={
+                "email": suggestions["user"]["email"], "password": "incorrect-demo-password", "role": "user",
+            })
+            self.assertEqual(user_login.status_code, 200)
+            self.assertEqual(admin_login.status_code, 200)
+            self.assertEqual(invalid_login.status_code, 401)
+            self.assertEqual(self.client.get("/api/incidents", headers={
+                "X-Auth-Token": user_login.json()["token"],
+            }).status_code, 403)
+            self.assertEqual(self.client.get("/api/incidents", headers={
+                "X-Admin-Token": admin_login.json()["token"],
+            }).status_code, 200)
+        configure_demo_accounts()
+
     def test_order_requires_authentication(self):
         response = self.client.get("/api/orders")
         self.assertEqual(response.status_code, 401)

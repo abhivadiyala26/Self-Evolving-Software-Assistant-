@@ -90,6 +90,16 @@ const Login = () => {
 
   const handleRoleSelect = (selectedRole) => setRole(selectedRole);
 
+  const selectDemoAccount = (selectedRole) => {
+    const credentials = demoInfo?.public_demo_accounts?.[selectedRole];
+    if (!credentials) return;
+    setIsLogin(true);
+    setRole(selectedRole);
+    setFormData({ name: '', email: credentials.email, password: credentials.password, confirmPassword: '' });
+    setError('');
+    setNotice('');
+  };
+
   const handleSubmit = async (e) => {
     e.preventDefault();
     setError('');
@@ -287,16 +297,17 @@ const Login = () => {
           </p>
         </div>
         
-        {isLogin && role === 'admin' && (
-          <div className="login-demo-note">
-            Admin sign-in uses the backend-configured demo account. {demoInfo?.admin_message || 'If login is unavailable, configure AUTOSRE_ADMIN_EMAIL and AUTOSRE_ADMIN_PASSWORD on the backend.'}
-          </div>
-        )}
-        {isLogin && role === 'user' && (
-          <div className="login-demo-note">
-            Demo user account. Use the credentials configured with DEMO_USER_EMAIL and DEMO_USER_PASSWORD.
-            {demoInfo?.demo_user_message && <p>{demoInfo.demo_user_message}</p>}
-            {demoInfo?.signup_mode === 'temporary' && <p>Signups are temporary and are lost when the backend restarts.</p>}
+        {isLogin && demoInfo?.public_demo_accounts && (
+          <div className="login-demo-note login-demo-suggestions">
+            <p>Try a demo account</p>
+            <div className="login-demo-actions">
+              <button type="button" className="demo-credential-button" onClick={() => selectDemoAccount('user')}>
+                Demo User
+              </button>
+              <button type="button" className="demo-credential-button" onClick={() => selectDemoAccount('admin')}>
+                Demo Admin
+              </button>
+            </div>
           </div>
         )}
         </div>

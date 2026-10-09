@@ -39,12 +39,10 @@ Automatic service-failure demos are disabled by default so a backend restart doe
 
 The existing Vercel frontend is `https://self-evolving-assistant-zeta.vercel.app`; its build root is `dashboard`. The existing Render API is `https://autosre-api.onrender.com`. Keep `VITE_API_BASE_URL` in Vercel set to the backend origin without `/api`, for example `https://autosre-api.onrender.com`.
 
-The current Render service can run without a database for the college-project demo. In the existing `autosre-api` service's Environment settings, configure these values; use private values and never commit them:
+The existing Render service can run without a database for the college-project demo. When Render has no `DATABASE_URL`, the backend enables two intentional public demo accounts; the login page fetches only those demo credentials for its suggestion buttons. They are not production credentials, and configured private admin passwords are never returned by the demo-info endpoint. The public accounts are disabled when a database URL is configured.
 
-- `AUTOSRE_ADMIN_EMAIL`: the admin demo account email.
-- `AUTOSRE_ADMIN_PASSWORD`: its private password, at least 12 characters.
-- `DEMO_USER_EMAIL`: the user demo account email, different from the admin email.
-- `DEMO_USER_PASSWORD`: its private password, at least 8 characters.
+- `AUTOSRE_ADMIN_EMAIL` and `AUTOSRE_ADMIN_PASSWORD`: optional private admin credentials (12–128 characters).
+- `DEMO_USER_EMAIL` and `DEMO_USER_PASSWORD`: optional private demo-user credentials (8–128 characters).
 - `AUTOSRE_CORS_ORIGINS`: `https://self-evolving-assistant-zeta.vercel.app` (comma-separate any additional exact frontend origins you use).
 
 Render will restart the existing backend after environment changes. Keep the frontend's `VITE_API_BASE_URL` pointing at the Render service. Pushing frontend code to the connected `main` branch triggers Vercel; pushing backend code triggers Render. `DATABASE_URL` is optional for demo sign-in and admin controls. It is needed only for persistent new accounts and order history; those features return an explicit unavailable response in database-free mode. Temporary signups and sessions are in process memory and can disappear on restart or when Render replaces the instance.

@@ -9,7 +9,8 @@
 .role-selector { display: flex; gap: 4px; margin-bottom: 20px; padding: 4px; border: 1px solid #e1e5e0; border-radius: 7px; background: #f7f8f6; }
 .role-btn { flex: 1; display: flex; align-items: center; justify-content: center; gap: 7px; padding: 9px; color: #667069; border: 0; border-radius: 5px; background: transparent; font-weight: 600; cursor: pointer; }
 .role-btn.active.user-btn, .role-btn.active.admin-btn { color: #2e684f; background: #eaf2ec; box-shadow: none; }
-.demo-credential-button { display: block; margin: -8px 0 16px auto; padding: 5px 8px; color: #34745b; border: 1px solid #cbd9ce; border-radius: 5px; background: #f7faf7; font-size: .76rem; cursor: pointer; }
+.demo-credential-button { display: inline-block; margin: 0; padding: 5px 10px; color: #34745b; border: 1px solid #cbd9ce; border-radius: 5px; background: #f7faf7; font-size: .76rem; cursor: pointer; }
+.demo-credential-button:hover { background: #eaf2ec; }
 .login-form { display: flex; flex-direction: column; gap: 16px; }
 .form-group { display: flex; flex-direction: column; gap: 6px; }
 .form-group label { color: #505b53; font-size: .83rem; font-weight: 600; }
@@ -21,6 +22,8 @@
 .login-footer p { margin: 0; }
 .toggle-mode { padding: 0; border: 0; background: transparent; color: #34745b; font: inherit; font-weight: 650; cursor: pointer; }
 .login-demo-note { margin-top: 24px; color: #788179; text-align: center; font-size: .75rem; }
-.login-demo-note p { margin-bottom: 8px; }
+.login-demo-suggestions { margin-top: 18px; }
+.login-demo-suggestions p { margin: 0 0 8px; }
+.login-demo-actions { display: flex; justify-content: center; gap: 8px; }
 .login-demo-inject { padding: 4px 7px; color: #667069; border: 1px solid #d8ded8; border-radius: 4px; background: transparent; font-size: .72rem; cursor: pointer; }
 @media (max-width: 480px) { .login-container { padding: 25px 20px; } }
