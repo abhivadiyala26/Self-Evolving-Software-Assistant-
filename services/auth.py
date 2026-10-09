@@ -7,7 +7,10 @@ import hmac
 import os
 import re
 import secrets
+import threading
 from datetime import datetime, timedelta, timezone
+from dataclasses import dataclass
+from uuid import uuid4
 
 from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
@@ -29,6 +32,29 @@ def _session_ttl_days() -> int:
 
 
 SESSION_TTL_DAYS = _session_ttl_days()
+
+
+@dataclass
+class DemoAccount:
+    """Process-local demo account. Passwords are stored only as scrypt hashes."""
+
+    id: str
+    name: str
+    email: str
+    role: str
+    password_hash: str
+
+
+_demo_lock = threading.RLock()
+_demo_accounts: dict[str, DemoAccount] = {}
+_demo_sessions: dict[str, tuple[str, datetime]] = {}
+_fixed_demo_emails: set[str] = set()
+_demo_auth_status = {
+    "admin_configured": False,
+    "demo_user_configured": False,
+    "admin_error": None,
+    "demo_user_error": None,
+}
 
 
 def normalize_email(email: str) -> str:
@@ -105,6 +131,131 @@ def revoke_session(db: Session, raw_token: str | None):
 
 def public_account(user: User) -> dict:
     return {"id": user.id, "name": user.name, "email": user.email, "role": user.role}
+
+
+def configure_demo_accounts() -> dict:
+    """Load env-configured demo identities; never provide source-code defaults."""
+    global _fixed_demo_emails
+    configured_by_role = {}
+    status = {}
+    definitions = (
+        ("admin", "AUTOSRE_ADMIN_EMAIL", "AUTOSRE_ADMIN_PASSWORD", "AutoSRE Admin", 12),
+        ("user", "DEMO_USER_EMAIL", "DEMO_USER_PASSWORD", "ShopSphere Demo User", PASSWORD_MIN_LENGTH),
+    )
+    for role, email_key, password_key, name, minimum in definitions:
+        raw_email = os.getenv(email_key, "").strip()
+        password = os.getenv(password_key, "")
+        complete = bool(raw_email and password)
+        if not complete:
+            status[f"{role}_configured" if role == "admin" else "demo_user_configured"] = False
+            status[f"{role}_error" if role == "admin" else "demo_user_error"] = None
+            continue
+        email = normalize_email(raw_email)
+        if not valid_email(email) or not minimum <= len(password) <= 128:
+            status[f"{role}_configured" if role == "admin" else "demo_user_configured"] = False
+            status[f"{role}_error" if role == "admin" else "demo_user_error"] = (
+                f"{email_key} must be a valid email and {password_key} must be between {minimum} and 128 characters."
+            )
+            continue
+        configured_by_role[role] = DemoAccount(
+            id=str(uuid4()), name=name, email=email, role=role, password_hash=hash_password(password)
+        )
+        status[f"{role}_configured" if role == "admin" else "demo_user_configured"] = True
+        status[f"{role}_error" if role == "admin" else "demo_user_error"] = None
+
+    # If both configured roles use the same email, disable both rather than
+    # allowing the selected role to determine that account's privileges.
+    configured_admin = configured_by_role.get("admin")
+    configured_user = configured_by_role.get("user")
+    if configured_admin and configured_user and configured_admin.email == configured_user.email:
+        configured_by_role.clear()
+        status["admin_configured"] = False
+        status["demo_user_configured"] = False
+        status["admin_error"] = "Admin and demo user must use different email addresses."
+        status["demo_user_error"] = "Admin and demo user must use different email addresses."
+    configured = {account.email: account for account in configured_by_role.values()}
+
+    with _demo_lock:
+        old_fixed_ids = {account.id for email, account in _demo_accounts.items() if email in _fixed_demo_emails}
+        _demo_accounts.update(configured)
+        for email in _fixed_demo_emails - set(configured):
+            _demo_accounts.pop(email, None)
+        _demo_sessions_copy = {
+            token_hash: session for token_hash, session in _demo_sessions.items()
+            if session[0] not in old_fixed_ids
+        }
+        _demo_sessions.clear()
+        _demo_sessions.update(_demo_sessions_copy)
+        _fixed_demo_emails = set(configured)
+        _demo_auth_status.update(status)
+        return dict(_demo_auth_status)
+
+
+def demo_auth_status() -> dict:
+    with _demo_lock:
+        return dict(_demo_auth_status)
+
+
+def demo_account_exists(email: str) -> bool:
+    normalized = normalize_email(email)
+    with _demo_lock:
+        return normalized in _demo_accounts
+
+
+def register_temporary_demo_user(name: str, email: str, password: str) -> DemoAccount:
+    normalized = normalize_email(email)
+    account = DemoAccount(
+        id=str(uuid4()), name=name.strip(), email=normalized, role="user", password_hash=hash_password(password)
+    )
+    with _demo_lock:
+        if normalized in _demo_accounts:
+            raise ValueError("An account already exists with this email.")
+        _demo_accounts[normalized] = account
+    return account
+
+
+def authenticate_demo_account(email: str, password: str, requested_role: str | None = None):
+    normalized = normalize_email(email)
+    with _demo_lock:
+        account = _demo_accounts.get(normalized)
+    if not account or (requested_role and requested_role != account.role):
+        return None
+    return account if verify_password(password, account.password_hash) else None
+
+
+def create_demo_session(user: DemoAccount) -> str:
+    raw_token = secrets.token_urlsafe(40)
+    token_hash = hashlib.sha256(raw_token.encode("utf-8")).hexdigest()
+    expires_at = datetime.now(timezone.utc) + timedelta(days=SESSION_TTL_DAYS)
+    with _demo_lock:
+        _demo_sessions[token_hash] = (user.id, expires_at)
+    return raw_token
+
+
+def authenticate_demo_session(raw_token: str | None):
+    if not raw_token:
+        return None
+    token_hash = hashlib.sha256(raw_token.encode("utf-8")).hexdigest()
+    now = datetime.now(timezone.utc)
+    with _demo_lock:
+        session = _demo_sessions.get(token_hash)
+        if not session:
+            return None
+        user_id, expires_at = session
+        if expires_at <= now:
+            _demo_sessions.pop(token_hash, None)
+            return None
+        account = next((candidate for candidate in _demo_accounts.values() if candidate.id == user_id), None)
+        if account is None:
+            _demo_sessions.pop(token_hash, None)
+        return account
+
+
+def revoke_demo_session(raw_token: str | None):
+    if raw_token:
+        token_hash = hashlib.sha256(raw_token.encode("utf-8")).hexdigest()
+        with _demo_lock:
+            _demo_sessions.pop(token_hash, None)
 
 
 def provision_configured_admin(db: Session) -> bool:

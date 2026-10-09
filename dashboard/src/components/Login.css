@@ -5,6 +5,7 @@
 .login-header h2 { margin: 10px 0 5px; font-size: 1.65rem; letter-spacing: -.04em; }
 .login-header p { margin: 0; color: #6c756e; font-size: .92rem; }
 .login-error { margin-bottom: 18px; padding: 10px 12px; border: 1px solid #e7c3bf; border-radius: 6px; background: #fcf2f0; color: #963f38; font-size: .86rem; }
+.login-notice { margin-bottom: 18px; padding: 10px 12px; border: 1px solid #cbd9ce; border-radius: 6px; background: #f1f7f2; color: #315e45; font-size: .86rem; }
 .role-selector { display: flex; gap: 4px; margin-bottom: 20px; padding: 4px; border: 1px solid #e1e5e0; border-radius: 7px; background: #f7f8f6; }
 .role-btn { flex: 1; display: flex; align-items: center; justify-content: center; gap: 7px; padding: 9px; color: #667069; border: 0; border-radius: 5px; background: transparent; font-weight: 600; cursor: pointer; }
 .role-btn.active.user-btn, .role-btn.active.admin-btn { color: #2e684f; background: #eaf2ec; box-shadow: none; }

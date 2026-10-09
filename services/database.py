@@ -104,7 +104,19 @@ def initialize_database():
 
 def get_db_session():
     if SessionLocal is None:
-        raise HTTPException(status_code=503, detail="Persistent storage is not configured. Set DATABASE_URL to a durable PostgreSQL database.")
+        raise HTTPException(status_code=503, detail="Order and account persistence is unavailable in demo mode. Configure DATABASE_URL to enable persistent orders and registrations.")
+    session = SessionLocal()
+    try:
+        yield session
+    finally:
+        session.close()
+
+
+def get_optional_db_session():
+    """Yield a database session when persistence is configured, otherwise None."""
+    if SessionLocal is None:
+        yield None
+        return
     session = SessionLocal()
     try:
         yield session

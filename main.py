@@ -22,16 +22,24 @@ from services.boutique_simulator import simulator
 from services.incident_service import incident_manager, evaluate_severity, analyze_impact
 from services.auth import (
     authenticate_session,
+    authenticate_demo_account,
+    authenticate_demo_session,
+    configure_demo_accounts,
+    create_demo_session,
     create_session,
+    demo_account_exists,
+    demo_auth_status,
     hash_password,
     normalize_email,
     public_account,
     provision_configured_admin,
+    register_temporary_demo_user,
+    revoke_demo_session,
     revoke_session,
     valid_email,
     verify_password,
 )
-from services.database import DATABASE_CONFIGURED, Order, SessionLocal, User, get_db_session, initialize_database
+from services.database import DATABASE_CONFIGURED, Order, SessionLocal, User, get_db_session, get_optional_db_session, initialize_database
 from services.recovery_policy import (
     AUTOMATIC_RECOVERY_ATTEMPTS,
     CRITICAL_ERROR_RATE_PERCENT,
@@ -90,6 +98,7 @@ database_ready = False
 @app.on_event("startup")
 async def startup_event():
     global database_ready
+    auth_status = configure_demo_accounts()
     if DATABASE_CONFIGURED:
         try:
             initialize_database()
@@ -123,7 +132,11 @@ async def startup_event():
                 background_agent["last_action"] = f"Account database initialization failed: {type(error).__name__}"
                 add_log("System", "Storage Error", "Account database initialization failed; auth and orders are unavailable until storage recovers.")
     else:
-        background_agent["last_action"] = "Durable database is not configured; configure DATABASE_URL to enable account and order persistence."
+        background_agent["last_action"] = "Demo authentication is active; persistent signups and orders require DATABASE_URL."
+
+    if auth_status.get("admin_error"):
+        background_agent["last_action"] = auth_status["admin_error"]
+        add_log("System", "Configuration Error", auth_status["admin_error"])
 
     if not any(task.get_name() in {"autosre-simulator", "autosre-monitor"} for task in runtime_tasks):
         runtime_tasks.extend([
@@ -217,35 +230,39 @@ def _bearer_token(authorization: str) -> str:
 def require_admin(
     x_admin_token: str = Header(default=""),
     authorization: str = Header(default=""),
-    db=Depends(get_db_session),
+    db=Depends(get_optional_db_session),
 ):
-    if not database_ready:
-        raise HTTPException(status_code=503, detail="Authentication storage is unavailable. Configure or restore the backend database.")
     token = x_admin_token or _bearer_token(authorization)
-    try:
-        authenticated = authenticate_session(db, token)
-    except SQLAlchemyError:
-        raise HTTPException(status_code=503, detail="Authentication storage is unavailable.")
-    if not authenticated or authenticated[0].role != "admin":
+    user = None
+    if db is not None and database_ready:
+        try:
+            authenticated = authenticate_session(db, token)
+            user = authenticated[0] if authenticated else None
+        except SQLAlchemyError:
+            user = None
+    user = user or authenticate_demo_session(token)
+    if not user or user.role != "admin":
         raise HTTPException(status_code=403, detail="Admin authentication required.")
-    return public_account(authenticated[0])
+    return public_account(user)
 
 def require_current_user(
     x_auth_token: str = Header(default=""),
     x_admin_token: str = Header(default=""),
     authorization: str = Header(default=""),
-    db=Depends(get_db_session),
+    db=Depends(get_optional_db_session),
 ):
-    if not database_ready:
-        raise HTTPException(status_code=503, detail="Authentication storage is unavailable. Configure or restore the backend database.")
     token = x_auth_token or x_admin_token or _bearer_token(authorization)
-    try:
-        authenticated = authenticate_session(db, token)
-    except SQLAlchemyError:
-        raise HTTPException(status_code=503, detail="Authentication storage is unavailable.")
-    if not authenticated:
+    user = None
+    if db is not None and database_ready:
+        try:
+            authenticated = authenticate_session(db, token)
+            user = authenticated[0] if authenticated else None
+        except SQLAlchemyError:
+            user = None
+    user = user or authenticate_demo_session(token)
+    if not user:
         raise HTTPException(status_code=401, detail="Sign in to access this account.")
-    return authenticated[0]
+    return user
 
 def add_log(agent: str, log_type: str, message: str):
     now = datetime.now(timezone.utc)
@@ -476,9 +493,7 @@ async def automatic_demo_failure_loop():
             await asyncio.sleep(DEMO_FAILURE_RECOVERY_PAUSE_SECONDS)
 
 @app.post("/api/auth/register")
-async def register_user(credentials: UserRegistration, db=Depends(get_db_session)):
-    if not database_ready:
-        raise HTTPException(status_code=503, detail="Account storage is unavailable. Configure or restore the backend database.")
+async def register_user(credentials: UserRegistration, db=Depends(get_optional_db_session)):
     name = credentials.name.strip()
     email = normalize_email(credentials.email)
     password = credentials.password
@@ -488,6 +503,20 @@ async def register_user(credentials: UserRegistration, db=Depends(get_db_session
         raise HTTPException(status_code=422, detail="Enter a valid email address.")
     if len(password) < 8 or len(password) > 128:
         raise HTTPException(status_code=422, detail="Password must be between 8 and 128 characters.")
+
+    if db is None or not database_ready:
+        try:
+            user = register_temporary_demo_user(name, email, password)
+        except ValueError as error:
+            raise HTTPException(status_code=409, detail=str(error))
+        return {
+            "user": public_account(user),
+            "persistence": "temporary",
+            "message": "Temporary demo account created. It will be lost when the backend restarts.",
+        }
+
+    if demo_account_exists(email):
+        raise HTTPException(status_code=409, detail="An account already exists with this email.")
     try:
         if db.scalar(select(User).where(User.email == email)):
             raise HTTPException(status_code=409, detail="An account already exists with this email.")
@@ -509,31 +538,53 @@ async def register_user(credentials: UserRegistration, db=Depends(get_db_session
     except SQLAlchemyError:
         db.rollback()
         raise HTTPException(status_code=503, detail="Account storage is unavailable.")
-    return {"token": token, "user": public_account(user)}
+    return {"token": token, "user": public_account(user), "persistence": "persistent"}
 
 @app.post("/api/auth/login")
-async def login(credentials: AdminLogin, db=Depends(get_db_session)):
+async def login(credentials: AdminLogin, db=Depends(get_optional_db_session)):
     # Admin access is part of the control plane and must remain available while
     # a simulated storefront or auth service outage is being investigated.
-    if not database_ready:
-        raise HTTPException(status_code=503, detail="Account storage is unavailable. Configure or restore the backend database.")
     if credentials.role not in {None, "user", "admin"}:
         raise HTTPException(status_code=422, detail="Select a valid account role.")
     email = normalize_email(credentials.email)
-    try:
-        user = db.scalar(select(User).where(User.email == email))
-        if not user or not verify_password(credentials.password, user.password_hash):
-            raise HTTPException(status_code=401, detail="Invalid email or password.")
-    except SQLAlchemyError:
-        raise HTTPException(status_code=503, detail="Account storage is unavailable.")
-    if credentials.role in {"user", "admin"} and credentials.role != user.role:
+    if db is not None and database_ready:
+        try:
+            user = db.scalar(select(User).where(User.email == email))
+            if user and verify_password(credentials.password, user.password_hash):
+                if credentials.role in {"user", "admin"} and credentials.role != user.role:
+                    raise HTTPException(status_code=401, detail="Invalid email or password.")
+                token = create_session(db, user)
+                return {
+                    "token": token,
+                    "user": public_account(user),
+                    "role": user.role,
+                    "name": user.name,
+                    "persistence": "persistent",
+                }
+        except HTTPException:
+            raise
+        except SQLAlchemyError:
+            # A configured demo identity can still authenticate during a
+            # database outage; database-backed accounts cannot.
+            pass
+
+    user = authenticate_demo_account(email, credentials.password, credentials.role)
+    if not user:
+        if credentials.role == "admin" and not demo_auth_status().get("admin_configured"):
+            config = demo_auth_status()
+            detail = config.get("admin_error") or (
+                "Admin demo account is not configured. Set AUTOSRE_ADMIN_EMAIL and AUTOSRE_ADMIN_PASSWORD on the backend."
+            )
+            raise HTTPException(status_code=503, detail=detail)
         raise HTTPException(status_code=401, detail="Invalid email or password.")
-    try:
-        token = create_session(db, user)
-    except SQLAlchemyError:
-        db.rollback()
-        raise HTTPException(status_code=503, detail="Account storage is unavailable.")
-    return {"token": token, "user": public_account(user), "role": user.role, "name": user.name}
+    token = create_demo_session(user)
+    return {
+        "token": token,
+        "user": public_account(user),
+        "role": user.role,
+        "name": user.name,
+        "persistence": "temporary",
+    }
 
 @app.post("/api/auth/logout")
 async def logout(
@@ -541,19 +592,41 @@ async def logout(
     x_auth_token: str = Header(default=""),
     x_admin_token: str = Header(default=""),
     authorization: str = Header(default=""),
-    db=Depends(get_db_session),
+    db=Depends(get_optional_db_session),
 ):
     del current_user
-    try:
-        revoke_session(db, x_auth_token or x_admin_token or _bearer_token(authorization))
-    except SQLAlchemyError:
-        db.rollback()
-        raise HTTPException(status_code=503, detail="Account storage is unavailable.")
+    token = x_auth_token or x_admin_token or _bearer_token(authorization)
+    revoke_demo_session(token)
+    if db is not None and database_ready:
+        try:
+            revoke_session(db, token)
+        except SQLAlchemyError:
+            db.rollback()
+            raise HTTPException(status_code=503, detail="Account storage is unavailable.")
     return {"status": "logged_out"}
 
 @app.get("/api/auth/me")
 async def get_current_account(current_user: User = Depends(require_current_user)):
     return public_account(current_user)
+
+@app.get("/api/auth/demo-info")
+async def get_demo_auth_info():
+    """Public setup state only; never returns credentials or password hashes."""
+    config = demo_auth_status()
+    persistent = bool(database_ready)
+    return {
+        "auth_mode": "persistent" if persistent else "demo",
+        "database_configured": persistent,
+        "admin_configured": config["admin_configured"],
+        "demo_user_configured": config["demo_user_configured"],
+        "signup_mode": "persistent" if persistent else "temporary",
+        "admin_message": config["admin_error"] or (None if config["admin_configured"] else (
+            "Admin demo login is not configured. Set AUTOSRE_ADMIN_EMAIL and AUTOSRE_ADMIN_PASSWORD in the backend environment."
+        )),
+        "demo_user_message": config["demo_user_error"] or (None if config["demo_user_configured"] else (
+            "The fixed demo user is not configured. Set DEMO_USER_EMAIL and DEMO_USER_PASSWORD in the backend environment, or create a temporary account."
+        )),
+    }
 
 @app.get("/api/status")
 async def get_status():

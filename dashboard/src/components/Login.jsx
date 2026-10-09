@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { Zap, Shield, User } from 'lucide-react';
 import { API_URL } from '../api';
@@ -73,15 +73,27 @@ const Login = () => {
   const [role, setRole] = useState(location.state?.authExpired ? 'admin' : 'user'); // 'user' or 'admin'
   const [formData, setFormData] = useState({ name: '', email: '', password: '', confirmPassword: '' });
   const [error, setError] = useState(location.state?.authExpired ? 'Your admin session expired. Sign in again to continue.' : '');
+  const [notice, setNotice] = useState('');
+  const [demoInfo, setDemoInfo] = useState(null);
   const { statuses: serviceStatuses, ready: servicesReady } = useServiceStatuses();
   const frontendUnavailable = servicesReady && isServiceUnavailable(serviceStatuses, 'frontend');
   const interactionsDisabled = !servicesReady;
+
+  useEffect(() => {
+    let active = true;
+    fetch(`${API_URL}/auth/demo-info`)
+      .then((response) => response.ok ? response.json() : null)
+      .then((data) => { if (active && data) setDemoInfo(data); })
+      .catch(() => { if (active) setDemoInfo(null); });
+    return () => { active = false; };
+  }, []);
 
   const handleRoleSelect = (selectedRole) => setRole(selectedRole);
 
   const handleSubmit = async (e) => {
     e.preventDefault();
     setError('');
+    setNotice('');
     if (!servicesReady) {
       setError('Checking service availability. Please try again shortly.');
       return;
@@ -124,6 +136,13 @@ const Login = () => {
           const migratedAccount = await migrateLegacyUser(formData);
           if (migratedAccount) data = migratedAccount;
         }
+        if (data.persistence === 'temporary' && !data.token) {
+          clearLegacyUser(formData.email);
+          setIsLogin(true);
+          setFormData((current) => ({ ...current, name: '', password: '', confirmPassword: '' }));
+          setNotice(`${data.message || 'Temporary demo account created.'} Sign in with the email and password you just used.`);
+          return;
+        }
         if (!res.ok && !data?.token) throw new Error(data.detail || 'Invalid email or password.');
         localStorage.removeItem('adminToken');
         clearLegacyUser(formData.email);
@@ -145,6 +164,10 @@ const Login = () => {
         setError('Passwords do not match.');
         return;
       }
+      if (!formData.name.trim()) {
+        setError('Enter your name.');
+        return;
+      }
       try {
         const res = await fetch(`${API_URL}/auth/register`, {
           method: 'POST',
@@ -153,6 +176,12 @@ const Login = () => {
         });
         const data = await res.json();
         if (!res.ok) throw new Error(data.detail || 'Could not create the account.');
+        if (data.persistence === 'temporary') {
+          setIsLogin(true);
+          setFormData((current) => ({ ...current, name: '', password: '', confirmPassword: '' }));
+          setNotice(`${data.message || 'Temporary demo account created.'} Sign in with the email and password you just used.`);
+          return;
+        }
         localStorage.removeItem('adminToken');
         clearLegacyUser(formData.email);
         saveAuthenticatedUser(data);
@@ -173,6 +202,7 @@ const Login = () => {
         </div>
 
         {error && <div className="login-error">{error}</div>}
+        {notice && <div className="login-notice" role="status">{notice}</div>}
         <ServiceAvailabilityNotice services={frontendUnavailable ? ['frontend'] : []} />
 
         <div className="login-interactions" inert={interactionsDisabled}>
@@ -257,7 +287,18 @@ const Login = () => {
           </p>
         </div>
         
-        {isLogin && role === 'admin' && <div className="login-demo-note">Admin access is provisioned by the backend environment configuration.</div>}
+        {isLogin && role === 'admin' && (
+          <div className="login-demo-note">
+            Admin sign-in uses the backend-configured demo account. {demoInfo?.admin_message || 'If login is unavailable, configure AUTOSRE_ADMIN_EMAIL and AUTOSRE_ADMIN_PASSWORD on the backend.'}
+          </div>
+        )}
+        {isLogin && role === 'user' && (
+          <div className="login-demo-note">
+            Demo user account. Use the credentials configured with DEMO_USER_EMAIL and DEMO_USER_PASSWORD.
+            {demoInfo?.demo_user_message && <p>{demoInfo.demo_user_message}</p>}
+            {demoInfo?.signup_mode === 'temporary' && <p>Signups are temporary and are lost when the backend restarts.</p>}
+          </div>
+        )}
         </div>
       </div>
     </div>

@@ -38,6 +38,8 @@ class AutoSRERegressionTests(unittest.TestCase):
         cls.env = patch.dict(os.environ, {
             "AUTOSRE_ADMIN_EMAIL": "operator@example.test",
             "AUTOSRE_ADMIN_PASSWORD": "test-admin-password-123",
+            "DEMO_USER_EMAIL": "demo-user@example.test",
+            "DEMO_USER_PASSWORD": "test-demo-password-123",
         })
         cls.env.start()
         database.engine = cls.engine
@@ -145,16 +147,82 @@ class AutoSRERegressionTests(unittest.TestCase):
         })
         self.assertEqual(response.status_code, 401)
 
-    def test_missing_durable_storage_fails_closed(self):
+    def test_missing_durable_storage_allows_temporary_signup_without_claiming_persistence(self):
         main.DATABASE_CONFIGURED = False
         main.database_ready = False
         try:
-            response = self.register()
-            self.assertEqual(response.status_code, 503)
-            self.assertIn("storage", response.json()["detail"].lower())
+            response = self.register(email="temporary-mode@example.test")
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.json()["persistence"], "temporary")
+            self.assertIn("lost when the backend restarts", response.json()["message"])
+            self.assertNotIn("token", response.json())
         finally:
             main.DATABASE_CONFIGURED = True
             main.database_ready = True
+
+    def test_database_free_demo_auth_and_admin_permissions(self):
+        with patch.object(database, "SessionLocal", None), patch.object(main, "database_ready", False), patch.object(main, "DATABASE_CONFIGURED", False):
+            info = self.client.get("/api/auth/demo-info")
+            self.assertEqual(info.status_code, 200)
+            self.assertEqual(info.json()["auth_mode"], "demo")
+            self.assertTrue(info.json()["admin_configured"])
+            self.assertNotIn("password", str(info.json()).lower())
+
+            admin_login = self.client.post("/api/auth/login", json={
+                "email": "operator@example.test", "password": "test-admin-password-123", "role": "admin",
+            })
+            user_login = self.client.post("/api/auth/login", json={
+                "email": "demo-user@example.test", "password": "test-demo-password-123", "role": "user",
+            })
+            invalid_login = self.client.post("/api/auth/login", json={
+                "email": "demo-user@example.test", "password": "incorrect-password", "role": "user",
+            })
+            self.assertEqual(admin_login.status_code, 200)
+            self.assertEqual(user_login.status_code, 200)
+            self.assertEqual(invalid_login.status_code, 401)
+            self.assertEqual(self.client.get("/api/incidents", headers={
+                "X-Admin-Token": admin_login.json()["token"],
+            }).status_code, 200)
+            self.assertEqual(self.client.get("/api/incidents", headers={
+                "X-Auth-Token": user_login.json()["token"],
+            }).status_code, 403)
+
+            signup = self.client.post("/api/auth/register", json={
+                "name": "Temporary Shopper", "email": "temporary@example.test", "password": "temporary-pass-123",
+            })
+            self.assertEqual(signup.status_code, 200)
+            self.assertEqual(signup.json()["persistence"], "temporary")
+            self.assertNotIn("token", signup.json())
+            temp_login = self.client.post("/api/auth/login", json={
+                "email": "temporary@example.test", "password": "temporary-pass-123", "role": "user",
+            })
+            self.assertEqual(temp_login.status_code, 200)
+            self.assertEqual(self.client.get("/api/auth/me", headers={
+                "X-Auth-Token": temp_login.json()["token"],
+            }).status_code, 200)
+            order_result = self.client.get("/api/orders", headers={
+                "X-Auth-Token": temp_login.json()["token"],
+            })
+            self.assertEqual(order_result.status_code, 503)
+            self.assertIn("order", order_result.json()["detail"].lower())
+
+    def test_missing_admin_environment_shows_configuration_instructions(self):
+        with patch.dict(os.environ, {"AUTOSRE_ADMIN_EMAIL": "", "AUTOSRE_ADMIN_PASSWORD": ""}), \
+             patch.object(database, "SessionLocal", None), patch.object(main, "database_ready", False):
+            from services.auth import configure_demo_accounts
+
+            configure_demo_accounts()
+            info = self.client.get("/api/auth/demo-info").json()
+            response = self.client.post("/api/auth/login", json={
+                "email": "admin@example.test", "password": "irrelevant-password", "role": "admin",
+            })
+            self.assertFalse(info["admin_configured"])
+            self.assertIn("AUTOSRE_ADMIN_EMAIL", info["admin_message"])
+            self.assertEqual(response.status_code, 503)
+            self.assertIn("AUTOSRE_ADMIN_PASSWORD", response.json()["detail"])
+        from services.auth import configure_demo_accounts
+
+        configure_demo_accounts()
 
     def test_order_requires_authentication(self):
         response = self.client.get("/api/orders")
